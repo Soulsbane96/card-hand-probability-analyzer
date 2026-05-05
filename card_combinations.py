@@ -81,6 +81,13 @@ SAVING & LOADING COMBINATIONS
 
 from __future__ import annotations
 
+# Standard library imports.
+# - argparse: CLI argument parsing
+# - csv: reading/writing deck and combination CSV files
+# - itertools: combinations() used for efficient hand generation
+# - math: math.comb() for computing C(n, k) totals without enumerating
+# - Counter: frequency counting for pattern/nof filter token matching
+# - Typing helpers: used throughout for annotation clarity
 import argparse
 import csv
 import itertools
@@ -92,6 +99,20 @@ from typing import Dict, List, Optional, Tuple
 # ---------------------------------------------------------------------------
 # Sequence registry
 # ---------------------------------------------------------------------------
+# Maps a card attribute name (e.g. "rank", "suit") to a list of its values
+# in their canonical order.  This order is used by the `straight` filter
+# token to decide whether a hand's values form a consecutive run.
+#
+# The registry is populated at deck-load time:
+#   - build_standard_deck()      hard-codes rank and suit orders
+#   - load_deck_from_csv()       infers order from CSV row appearance
+#   - load_combinations_csv()    infers order by scanning all loaded hands
+#
+# Supporting functions:
+#   register_sequence_order  — write an entry into the registry
+#   get_sequence_order       — read an entry (returns None if unregistered)
+#   _is_consecutive          — test whether a list of integer indices forms
+#                              a run, with optional wrap-around support
 
 _SEQUENCE_ORDER: Dict[str, List[str]] = {}
 
@@ -106,11 +127,15 @@ def _is_consecutive(indices: List[int], wrap: bool, total: int) -> bool:
     n = len(s)
     if n < 2:
         return True
-    # Non-wrap: each adjacent gap must be 1
+    # Non-wrap: every adjacent pair in sorted order must differ by exactly 1.
     if not wrap:
         return all(s[i+1] - s[i] == 1 for i in range(n - 1))
-    # Wrap: exactly one gap > 1, and that gap must be total-(n-1)
-    # (so the rest of the circle is filled by the n-1 unit steps)
+    # Wrap: treat the order as a circular ring of `total` positions.
+    # Build the n gaps between consecutive sorted indices plus the one
+    # gap that wraps from the last back to the first.  A valid circular
+    # straight has exactly one gap that is not 1 (the "break" in the ring),
+    # and that break must account for all the remaining positions
+    # (i.e. total - (n-1) unit steps).
     cyclic_gaps = [s[i+1] - s[i] for i in range(n - 1)] + [total - s[-1] + s[0]]
     big = [g for g in cyclic_gaps if g != 1]
     return len(big) == 1 and big[0] == total - (n - 1)
@@ -119,6 +144,17 @@ def _is_consecutive(indices: List[int], wrap: bool, total: int) -> bool:
 # ---------------------------------------------------------------------------
 # Card
 # ---------------------------------------------------------------------------
+# Represents a single card as a flat dict of attribute → value strings.
+# Attribute names are normalised to lower-case on construction so callers
+# can use any casing.
+#
+# Key design points for maintainers:
+#   - attr()            raises ValueError for unknown names, making filter
+#                       errors explicit rather than silently returning None.
+#   - label()           produces a human-readable string; falls back to
+#                       "key=value  key=value …" for non-standard decks.
+#   - __hash__/__eq__   are defined so Card instances can be stored in sets
+#                       and used as dict keys (needed by combination dedup).
 
 class Card:
     def __init__(self, attributes: Dict[str, str]):
@@ -158,6 +194,18 @@ class Card:
 # ---------------------------------------------------------------------------
 # Deck sources
 # ---------------------------------------------------------------------------
+# Two ways to obtain a deck at runtime:
+#
+#   build_standard_deck()    — hard-codes the 52-card deck and registers the
+#                              canonical rank / suit orders for straight detection.
+#   load_deck_from_csv()     — reads any CSV where each row is one card and
+#                              column headers become attribute names.  Sequence
+#                              order is inferred from the CSV row order, so the
+#                              first appearance of each value becomes position 0.
+#
+# Both functions accept an optional `size` argument to truncate the deck.
+# Both return (deck: List[Card], columns: List[str]) so callers always know
+# which attribute names are available.
 
 _SUITS  = ("Clubs", "Diamonds", "Hearts", "Spades")
 _RANKS  = ("2","3","4","5","6","7","8","9","10","Jack","Queen","King","Ace")
@@ -184,6 +232,9 @@ def load_deck_from_csv(path: str, size: Optional[int] = None) -> Tuple[List[Card
     if not deck:
         raise ValueError(f"CSV {path!r} has no data rows.")
     deck = deck[:size] if size else deck
+    # Walk every column and record the first-seen order of each value.
+    # This preserves the CSV row order as the "natural" sequence, which
+    # the straight filter relies on for gap calculations.
     for col in columns:
         key = col.lower()
         seen: List[str] = []
@@ -200,6 +251,21 @@ def load_deck_from_csv(path: str, size: Optional[int] = None) -> Tuple[List[Card
 # ---------------------------------------------------------------------------
 # Combinations CSV  —  save / load
 # ---------------------------------------------------------------------------
+# Generating all C(52, 5) = 2,598,960 hands takes a few seconds; this pair
+# of functions lets callers persist that work to disk and reload it later so
+# the expensive itertools.combinations() step can be skipped on re-runs.
+#
+# File format:
+#   Headers  →  card1_rank, card1_suit, card1_color, card2_rank, …
+#               (one column per (card_position × attribute) combination)
+#   Each row →  one complete hand, all card attributes flattened in order
+#
+# On load, sequence orders are re-inferred from value appearance order so
+# the straight filter works exactly as it would after a fresh deck load.
+#
+# _combo_col_headers()         — pure helper that generates the header list
+# save_combinations_csv()      — writes the flat CSV described above
+# load_combinations_csv()      — reads it back, returning (combos, attr_names, hand_size)
 
 def _combo_col_headers(attr_names: List[str], hand_size: int) -> List[str]:
     return [f"card{i+1}_{a}" for i in range(hand_size) for a in attr_names]
@@ -229,12 +295,16 @@ def load_combinations_csv(path: str) -> Tuple[List[Tuple[Card, ...]], List[str],
         if reader.fieldnames is None:
             raise ValueError(f"Combinations CSV {path!r} has no header row.")
         headers = [h.strip() for h in reader.fieldnames]
+        # Infer attribute names from columns prefixed with "card1_".
+        # If none exist the file was not produced by save_combinations_csv().
         card1_attrs = [h[len("card1_"):] for h in headers if h.lower().startswith("card1_")]
         if not card1_attrs:
             raise ValueError(
                 "Cannot parse combinations CSV — expected columns like 'card1_rank', 'card1_suit' …"
             )
         attr_names = card1_attrs
+        # Determine hand size by counting how many columns share the first attribute name
+        # (one per card position, e.g. card1_rank, card2_rank, card3_rank … = hand_size 3).
         hand_size  = sum(1 for h in headers if h.lower().endswith(f"_{attr_names[0].lower()}"))
         combinations: List[Tuple[Card, ...]] = []
         for row in reader:
@@ -244,6 +314,8 @@ def load_combinations_csv(path: str) -> Tuple[List[Tuple[Card, ...]], List[str],
             )
             combinations.append(hand)
 
+    # Re-infer sequence order from value appearance across all loaded hands
+    # so straight detection works identically to a freshly built deck.
     for attr in attr_names:
         seen: List[str] = []
         seen_set: set = set()
@@ -261,6 +333,27 @@ def load_combinations_csv(path: str) -> Tuple[List[Tuple[Card, ...]], List[str],
 # ---------------------------------------------------------------------------
 # Filter DSL
 # ---------------------------------------------------------------------------
+# Parses and evaluates the --filter string into a three-level hierarchy:
+#
+#   FilterSpec      — top level; one or more clauses joined by ";" (OR logic).
+#                     A hand matches the spec if ANY clause matches it.
+#
+#   FilterClause    — one semicolon-delimited segment; contains one or more
+#                     tokens joined by "," (AND logic).  A hand matches the
+#                     clause only if ALL tokens match.
+#
+#   FilterToken     — a single predicate string such as "all:suit" or
+#                     "pattern:rank=3+2".  Parsing happens in __init__ via
+#                     _parse(); evaluation against a hand is in matches().
+#
+# To add a new token type:
+#   1. Add a branch in FilterToken._parse() that sets self.kind and any
+#      needed fields (self.attr, self.count, etc.).
+#   2. Add a matching branch in FilterToken.matches().
+#   3. Add a branch in FilterToken.describe() for the report label.
+#   4. Update referenced_attrs() if the new type uses an attribute name.
+#
+# parse_filter()   is the public entry point; returns None for empty input.
 
 class FilterToken:
     def __init__(self, token: str):
@@ -271,12 +364,17 @@ class FilterToken:
         tok = self.raw
         lo  = tok.lower()
 
+        # "all:<attr>"  — every card in the hand shares the same value (e.g. flush)
         if lo.startswith("all:"):
             self.kind = "all";  self.attr = tok[4:].strip();  return
 
+        # "unique:<attr>"  — every card has a different value for this attribute
         if lo.startswith("unique:"):
             self.kind = "unique";  self.attr = tok[7:].strip();  return
 
+        # "straight:<attr>" or "straight:<attr>:wrap"
+        # Values must form a consecutive run in the registered sequence order.
+        # Defaults to no-wrap; pass ":wrap" for circular (Ace-low) straights.
         if lo.startswith("straight:"):
             rest  = tok[9:].split(":")
             self.kind = "straight"
@@ -285,6 +383,9 @@ class FilterToken:
             self.wrap = True if flag == "wrap" else False
             return
 
+        # "pattern:<attr>=n1+n2+…"
+        # The sorted frequency counts of attr values must match exactly.
+        # e.g. pattern:rank=3+2  →  full house (stored as (3,2) after sorting)
         if lo.startswith("pattern:"):
             rest = tok[8:]
             attr, pat = rest.split("=", 1)
@@ -293,6 +394,8 @@ class FilterToken:
             self.pattern = tuple(sorted([int(x) for x in pat.strip().split("+")], reverse=True))
             return
 
+        # "nof:<attr><op><n>"  — some value of attr appears op n times
+        # op may be >=, <=, or =  (tried in that order to avoid mis-splitting ">=")
         if lo.startswith("nof:"):
             rest = tok[4:]
             for op in (">=", "<=", "="):
@@ -303,6 +406,8 @@ class FilterToken:
                     return
             raise ValueError(f"'nof:' token missing operator in {tok!r}")
 
+        # "<attr>:<value><op><count>"  — count cards where attr == value
+        # Tries >=, <=, = in that order to avoid splitting ">" from ">="
         for op in (">=", "<=", "="):
             if op in tok:
                 left, right = tok.split(op, 1)
@@ -320,12 +425,17 @@ class FilterToken:
         )
 
     def matches(self, hand: Tuple[Card, ...]) -> bool:
+        # All cards share the same value for this attribute (e.g. flush = all same suit)
         if self.kind == "all":
             return len({c.attr(self.attr) for c in hand}) == 1
 
+        # Every card has a distinct value for this attribute
         if self.kind == "unique":
             return len({c.attr(self.attr) for c in hand}) == len(hand)
 
+        # Cards form a consecutive run in the registered sequence order.
+        # Requires all values to be distinct first to avoid duplicates
+        # confusing the index lookup.
         if self.kind == "straight":
             vals = [c.attr(self.attr) for c in hand]
             if len(set(vals)) != len(vals):
@@ -338,16 +448,20 @@ class FilterToken:
                 return False
             return _is_consecutive([idx_map[v] for v in vals], self.wrap, len(order))
 
+        # Frequency pattern: sorted counts of attr values must match self.pattern exactly
+        # e.g. pattern (3,2) matches a hand where one value appears 3× and another 2×
         if self.kind == "pattern":
             freq = tuple(sorted(Counter(c.attr(self.attr) for c in hand).values(), reverse=True))
             return freq == self.pattern
 
+        # N-of-a-kind: at least one value of attr satisfies the count condition
         if self.kind == "nof":
             counts = Counter(c.attr(self.attr) for c in hand).values()
             if self.op == "=":  return any(v == self.count for v in counts)
             if self.op == ">=": return any(v >= self.count for v in counts)
             if self.op == "<=": return any(v <= self.count for v in counts)
 
+        # Exact value count: count cards where attr == self.value and compare to self.count
         if self.kind == "count":
             actual = sum(1 for c in hand if c.attr(self.attr) == self.value)
             if self.op == "=":  return actual == self.count
@@ -374,6 +488,9 @@ class FilterToken:
 
 
 class FilterClause:
+    """AND-group of FilterToken predicates, comma-separated within one semicolon segment.
+    A hand matches this clause only when every token in self.tokens returns True."""
+
     def __init__(self, clause_str: str):
         self.raw    = clause_str.strip()
         self.tokens = [FilterToken(t) for t in clause_str.split(",") if t.strip()]
@@ -389,6 +506,9 @@ class FilterClause:
 
 
 class FilterSpec:
+    """Top-level filter parsed from the --filter string.
+    Clauses are split on ";" and OR-ed together: a hand matches if ANY single clause matches."""
+
     def __init__(self, filter_str: str):
         self.raw     = filter_str.strip()
         self.clauses = [FilterClause(c) for c in filter_str.split(";") if c.strip()]
@@ -402,6 +522,8 @@ class FilterSpec:
         return "  OR  ".join(f"({c.describe()})" for c in self.clauses)
 
     def validate_attrs(self, attr_names: List[str]) -> None:
+        # Called before the main scan so attribute typos surface immediately
+        # rather than silently matching zero hands.
         for clause in self.clauses:
             for attr in clause.referenced_attrs():
                 if attr not in attr_names:
@@ -417,6 +539,13 @@ def parse_filter(filter_str: str) -> Optional[FilterSpec]:
 # ---------------------------------------------------------------------------
 # Aggregate checks — only generate meaningful ones for each attribute
 # ---------------------------------------------------------------------------
+# build_aggregate_checks() produces the full list of (label, fn, is_filter_row)
+# triples that drive the statistics table in the report.
+#
+# _unique_values_in_deck() is a helper used internally to decide which checks
+# are worth including — it counts how many distinct values an attribute has
+# across all combinations so that trivially-forced or impossible checks are
+# suppressed (see the docstring on build_aggregate_checks for the full rules).
 
 def _unique_values_in_deck(attr: str, combinations: List[Tuple[Card, ...]]) -> int:
     """Count how many distinct values appear for this attr across all hands."""
@@ -460,6 +589,8 @@ def build_aggregate_checks(
     checks: List[Tuple[str, any, bool]] = []
     seen_labels: set = set()
 
+    # Dedup helper — silently ignores duplicate labels so filter rows and
+    # auto-rows never produce the same entry twice in the output table.
     def add(label: str, fn, is_filter: bool = False) -> None:
         if label not in seen_labels:
             checks.append((label, fn, is_filter))
@@ -467,6 +598,9 @@ def build_aggregate_checks(
 
     # ------------------------------------------------------------------
     # 1. One row per filter clause (marked as filter rows)
+    # Each clause gets its own ▶-marked row at the top of the table so the
+    # operator can immediately see the count for their exact filter condition.
+    # The count is still measured against ALL hands, not just the filtered set.
     # ------------------------------------------------------------------
     if filter_spec:
         for clause in filter_spec.clauses:
@@ -476,6 +610,8 @@ def build_aggregate_checks(
 
     # ------------------------------------------------------------------
     # 2. Auto-generated rows per attribute
+    # For each attribute, generate only the checks that can produce a
+    # non-trivial (non-zero, non-100%) result given the deck's cardinality.
     # ------------------------------------------------------------------
     for attr in attr_names:
         a        = attr
@@ -483,7 +619,8 @@ def build_aggregate_checks(
         order    = get_sequence_order(a)
         ord_size = len(order) if order else n_unique
 
-        # All same (e.g. flush) — always
+        # All same (e.g. flush) — always meaningful; will be 0 only for
+        # attributes with more unique values than hand_size.
         add(f"All same {attr}",
             lambda h, a=a: len({c.attr(a) for c in h}) == 1)
 
@@ -492,7 +629,9 @@ def build_aggregate_checks(
             add(f"All distinct {attr}",
                 lambda h, a=a: len({c.attr(a) for c in h}) == len(h))
 
-        # Straight — only when there's room beyond hand_size for a run to be selective
+        # Straight — only when there's room beyond hand_size for a run to be selective.
+        # If n_unique == hand_size then every all-distinct hand is trivially a straight,
+        # making it an uninformative duplicate of "All distinct".
         if order and n_unique > hand_size:
             add(f"Straight {attr} (no wrap)",
                 lambda h, a=a, order=order, sz=ord_size: (
@@ -511,7 +650,9 @@ def build_aggregate_checks(
                     )
                 ))
 
-        # N-of-a-kind — skip when trivially forced by pigeonhole or impossible
+        # N-of-a-kind — skip when trivially forced by pigeonhole or impossible.
+        # pigeonhole_forced: if hand_size > n_unique * (n-1), every hand must
+        # contain at least one value ≥ n times (by pigeonhole principle).
         for n in range(2, hand_size + 1):
             pigeonhole_forced = hand_size > n_unique * (n - 1)
             if n <= n_unique and not pigeonhole_forced:
@@ -520,9 +661,9 @@ def build_aggregate_checks(
                         v >= n for v in Counter(c.attr(a) for c in h).values()
                     ))
 
-        # Named patterns — only for attributes with enough unique values
-        # (n_unique >= hand_size ensures patterns aren't trivially dominated by
-        # low-cardinality attrs like suit=4 or color=2)
+        # Named patterns — only for attributes with enough unique values.
+        # Low-cardinality attributes (suit=4 unique values, color=2) would produce
+        # misleading pattern rows like "Full house suit" — excluded here.
         if n_unique >= hand_size:
             for pattern, name in [
                 ((3, 2),       f"Full house {attr} (3+2)"),
@@ -533,6 +674,7 @@ def build_aggregate_checks(
                 ((2, 1),       f"One pair {attr} (2+1)"),
                 ((3, 1),       f"Three-of-a-kind {attr} (3+1)"),
             ]:
+                # Only add patterns whose card counts sum to the actual hand size
                 if sum(pattern) == hand_size:
                     _p = pattern
                     add(name,
@@ -542,6 +684,8 @@ def build_aggregate_checks(
 
     # ------------------------------------------------------------------
     # 3. All-same for every pair of attributes
+    # Checks whether all cards share the same value on both attributes
+    # simultaneously (e.g. same rank AND same suit = all identical cards).
     # ------------------------------------------------------------------
     for i, a1 in enumerate(attr_names):
         for a2 in attr_names[i + 1:]:
@@ -555,6 +699,18 @@ def build_aggregate_checks(
 # ---------------------------------------------------------------------------
 # Statistics
 # ---------------------------------------------------------------------------
+# check_filter_warnings()  — pre-flight validation that catches filter clauses
+#                            guaranteed to match zero hands (e.g. pattern sum ≠
+#                            hand_size), emitting ⚠ warnings before the scan.
+#
+# compute_stats()          — single pass over all combinations that:
+#                              1. Applies filter_spec to collect matching hands.
+#                              2. Runs every aggregate check against ALL hands
+#                                 (so percentages are always "% of total").
+#                              3. Tallies per-attribute value frequencies across
+#                                 the filtered (or all) hands for the frequency table.
+#                            Returns a plain dict so print_report() can consume
+#                            it without re-running any calculations.
 
 def check_filter_warnings(filter_spec: FilterSpec, hand_size: int) -> List[str]:
     """Return warnings for filter clauses that can never match."""
@@ -583,20 +739,26 @@ def compute_stats(
     hand_size: int,
 ) -> dict:
     total    = len(combinations)
+    # Collect hands that satisfy the filter, or all hands if no filter is active.
     filtered = (
         [h for h in combinations if filter_spec.matches(h)]
         if filter_spec else list(combinations)
     )
 
+    # Build the aggregate check list (suppresses trivial/impossible checks).
     agg_checks = build_aggregate_checks(attr_names, hand_size, combinations, filter_spec)
 
-    # All aggregate counts run against ALL combinations so % are always "% of total"
+    # All aggregate counts run against ALL combinations so % are always "% of total".
+    # Iterating once and dispatching to each check fn is O(n_combinations * n_checks).
     agg_counts = {label: 0 for label, _, _ in agg_checks}
     for hand in combinations:
         for label, fn, _ in agg_checks:
             if fn(hand):
                 agg_counts[label] += 1
 
+    # Per-attribute value frequencies measured across only the filtered hands.
+    # Used in the "Attribute Frequency" table to show which values are most common
+    # in the result set (e.g. which suits appear most in a flush filter).
     attr_freq: Dict[str, Counter] = {a: Counter() for a in attr_names}
     for hand in filtered:
         for card in hand:
@@ -616,8 +778,20 @@ def compute_stats(
 # ---------------------------------------------------------------------------
 # Display
 # ---------------------------------------------------------------------------
+# _pct()         — formats a fraction as a percentage string to 4 decimal places.
+#                  Returns "0.0000%" when whole == 0 to avoid ZeroDivisionError.
+#
+# print_report() — renders the full analysis to stdout in three blocks:
+#                    1. Header with total combination count and active filter.
+#                    2. Aggregate Statistics table — one row per check, with ▶
+#                       markers on filter rows and a visual separator between
+#                       filter rows and auto-generated rows.
+#                    3. Attribute Frequency table — value counts across the
+#                       filtered (or all) hands, sorted by descending frequency.
+#                    4. Verbose hand listing (only when --verbose is set).
 
 def _pct(part: int, whole: int) -> str:
+    """Return part/whole as a percentage string with 4 decimal places; safe when whole is 0."""
     if whole == 0: return "0.0000%"
     return f"{100 * part / whole:.4f}%"
 
@@ -692,6 +866,7 @@ def print_report(
 # ---------------------------------------------------------------------------
 
 def main():
+    """CLI entry point: parse args → load deck or combinations → apply filter → print report."""
     parser = argparse.ArgumentParser(
         description="Analyse all X-card combinations from a deck.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
