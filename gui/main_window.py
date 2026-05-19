@@ -43,7 +43,7 @@ class MainWindow(QMainWindow):
         self._build_menu_bar()
 
     def _build_menu_bar(self) -> None:
-        view_menu = self.menuBar().addMenu("View")
+        theme_menu = self.menuBar().addMenu("Theme")
 
         light_action = QAction("Light Mode", self, checkable=True)
         dark_action  = QAction("Dark Mode",  self, checkable=True)
@@ -55,8 +55,8 @@ class MainWindow(QMainWindow):
         light_action.triggered.connect(lambda: self._set_theme("light"))
         dark_action.triggered.connect(lambda:  self._set_theme("dark"))
 
-        view_menu.addAction(light_action)
-        view_menu.addAction(dark_action)
+        theme_menu.addAction(light_action)
+        theme_menu.addAction(dark_action)
 
         self._light_action = light_action
         self._dark_action  = dark_action
