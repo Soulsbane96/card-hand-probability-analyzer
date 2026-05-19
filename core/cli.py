@@ -1,0 +1,203 @@
+"""
+card_combinations CLI
+=====================
+Generate all C(deck_size, X) combinations of cards from a deck,
+then report aggregate statistics and filtered results.
+
+DECK SOURCES
+  • Built-in standard 52-card deck  (default, no --deck flag)
+  • CSV file   --deck my_deck.csv   (any columns, any attribute names)
+  • Pre-saved combinations CSV  --load-combos hands5.csv  (skip recalculation)
+
+CSV DECK FORMAT
+  Each row is one card; column headers become attribute names.
+
+      Rank,Suit,Color,Value
+      2,Clubs,Black,2
+      Ace,Spades,Black,14
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+FILTER DSL   --filter / -f
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+STRUCTURE
+  • Tokens within a clause are comma-separated and ALL must match (AND).
+  • Clauses are semicolon-separated; ANY clause matching = hand matches (OR).
+
+TOKEN REFERENCE
+  all:<attr>
+      Every card shares the same value for <attr>.
+      e.g.  all:suit  →  flush
+
+  unique:<attr>
+      Every card has a different value for <attr>.
+      e.g.  unique:rank  →  all ranks distinct
+
+  straight:<attr>
+  straight:<attr>:nowrap   (default — no wrap-around)
+      The hand's values form a run of consecutive steps in the deck's
+      natural order (CSV row order / built-in rank order).
+      All values must be distinct.
+      e.g.  straight:rank           →  3 4 5 6 7 (any suits)
+            straight:rank,all:suit  →  straight flush
+
+  straight:<attr>:wrap
+      Consecutive on a circular ring — the sequence may cross the
+      end-of-order boundary (e.g. A-2-3-4-5, Q-K-A-2-3 …).
+
+  pattern:<attr>=n1+n2+…
+      The sorted frequency counts of <attr> values match exactly.
+      e.g.  pattern:rank=3+2   →  full house
+            pattern:rank=4+1   →  four of a kind
+            pattern:rank=2+2+1 →  two pair
+
+  nof:<attr>=<n>     some value of <attr> appears exactly <n> times
+  nof:<attr>>=<n>    some value of <attr> appears at least <n> times
+  nof:<attr><=<n>    some value of <attr> appears at most  <n> times
+
+  <attr>:<value>=<count>   exactly  <count> cards have attr == value
+  <attr>:<value>>=<count>  at least <count> cards have attr == value
+  <attr>:<value><=<count>  at most  <count> cards have attr == value
+
+EXAMPLES
+  -f "all:suit"                         # Flush
+  -f "straight:rank"                    # Straight (no wrap)
+  -f "straight:rank,all:suit"           # Straight flush
+  -f "pattern:rank=3+2"                 # Full house
+  -f "pattern:rank=4+1"                 # Four of a kind
+  -f "pattern:rank=2+2+1"              # Two pair
+  -f "pattern:rank=3+2;pattern:rank=4+1"  # Full house OR four of a kind
+  -f "rank:5=2,suit:Hearts=3"           # Exactly 2 Fives AND 3 Hearts
+  -f "straight:rank:wrap"               # Wrap-around straight
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SAVING & LOADING COMBINATIONS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  # Generate once and save to disk
+  python card_combinations.py -n 5 --save-combos hands5.csv
+
+  # Later: load and apply any filter instantly
+  python card_combinations.py --load-combos hands5.csv -f "straight:rank,all:suit"
+"""
+
+from __future__ import annotations
+
+import argparse
+import itertools
+import math
+
+from core.cards import build_standard_deck, get_sequence_order, load_deck_from_csv
+from core.filters import parse_filter
+from core.io import load_combinations_csv, save_combinations_csv
+from core.analysis import check_filter_warnings, compute_stats, print_report
+
+
+def main():
+    """CLI entry point: parse args → load deck or combinations → apply filter → print report."""
+    parser = argparse.ArgumentParser(
+        description="Analyse all X-card combinations from a deck.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=__doc__,
+    )
+
+    src = parser.add_mutually_exclusive_group()
+    src.add_argument("--deck", "-D", type=str, default=None, metavar="CSV_FILE",
+        help="CSV deck file (one row per card, headers = attributes). "
+             "Omit for the built-in 52-card deck.")
+    src.add_argument("--load-combos", type=str, default=None, metavar="CSV_FILE",
+        help="Load a previously saved combinations CSV to skip recalculation.")
+
+    parser.add_argument("--hand-size", "-n", type=int, default=5,
+        help="Cards per combination (default: 5). Ignored with --load-combos.")
+    parser.add_argument("--deck-size", "-d", type=int, default=None,
+        help="Use only the first N cards of the deck.")
+    parser.add_argument("--save-combos", type=str, default=None, metavar="CSV_FILE",
+        help="Save all generated combinations to this CSV file for later reuse.")
+    parser.add_argument("--filter", "-f", type=str, default="",
+        metavar="FILTER_STRING",
+        help=(
+            "Filter string. Comma = AND within a clause, semicolon = OR between clauses.\n"
+            "Tokens: all:<a>  unique:<a>  straight:<a>[:wrap]  pattern:<a>=n+n\n"
+            "        nof:<a><op><n>  <a>:<v><op><count>   (op: =  >=  <=)"
+        ),
+    )
+    parser.add_argument("--label-col", type=str, default=None, metavar="COLUMN",
+        help="Column to use as card label in verbose output.")
+    parser.add_argument("--list-attrs", action="store_true",
+        help="Print attribute names and unique values, then exit.")
+    parser.add_argument("--verbose", "-v", action="store_true",
+        help="Print every matching hand (can be very large!).")
+
+    args = parser.parse_args()
+
+    # ------------------------------------------------------------------
+    # Load / generate combinations
+    # ------------------------------------------------------------------
+    if args.load_combos:
+        print(f"\nLoading combinations from  {args.load_combos!r} …")
+        try:
+            combos, attr_names, hand_size = load_combinations_csv(args.load_combos)
+        except FileNotFoundError:
+            parser.error(f"File not found: {args.load_combos!r}")
+        except Exception as exc:
+            parser.error(str(exc))
+        columns    = attr_names
+        print(f"  {len(combos):,} combinations loaded  |  "
+              f"Hand size: {hand_size}  |  Attributes: {', '.join(attr_names)}")
+
+    else:
+        if args.deck:
+            print(f"\nLoading deck from  {args.deck!r} …")
+            try:
+                deck, columns = load_deck_from_csv(args.deck, args.deck_size)
+            except FileNotFoundError:
+                parser.error(f"File not found: {args.deck!r}")
+            except Exception as exc:
+                parser.error(str(exc))
+            print(f"  {len(deck)} cards loaded  |  Attributes: {', '.join(columns)}")
+        else:
+            deck, columns = build_standard_deck(args.deck_size)
+            print(f"\nUsing built-in 52-card deck"
+                  f"{f' (first {args.deck_size})' if args.deck_size else ''}.")
+
+        attr_names = [c.lower() for c in columns]
+        hand_size  = args.hand_size
+
+        if args.list_attrs:
+            print("\nCard attributes in this deck:")
+            for col in columns:
+                key   = col.lower()
+                order = get_sequence_order(key)
+                vals  = order if order else sorted({c.attr(key) for c in deck})
+                print(f"  {col:24}  ({len(vals):>3} unique):  {', '.join(vals)}")
+            return
+
+        if hand_size > len(deck):
+            parser.error(f"Hand size {hand_size} exceeds deck size {len(deck)}.")
+
+        total_count = math.comb(len(deck), hand_size)
+        print(f"\nGenerating C({len(deck)}, {hand_size}) = {total_count:,} combinations …")
+        combos = list(itertools.combinations(deck, hand_size))
+
+        if args.save_combos:
+            save_combinations_csv(args.save_combos, combos, attr_names)
+
+    # ------------------------------------------------------------------
+    # Parse & validate filter
+    # ------------------------------------------------------------------
+    filter_spec = parse_filter(args.filter)
+    if filter_spec:
+        try:
+            filter_spec.validate_attrs(attr_names)
+        except ValueError as exc:
+            parser.error(str(exc))
+
+    # ------------------------------------------------------------------
+    # Analyse & report
+    # ------------------------------------------------------------------
+    warnings = check_filter_warnings(filter_spec, hand_size) if filter_spec else []
+    stats = compute_stats(combos, filter_spec, attr_names, hand_size)
+    print_report(stats, filter_spec, hand_size, attr_names, args.label_col, args.verbose, warnings)
+
+
+if __name__ == "__main__":
+    main()
