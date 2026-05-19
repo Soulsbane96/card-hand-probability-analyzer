@@ -4,6 +4,7 @@ import sys
 from typing import Dict, List, Optional
 
 from PyQt6.QtCore import Qt
+from PyQt6.QtGui import QAction, QActionGroup
 from PyQt6.QtWidgets import (
     QApplication,
     QGroupBox,
@@ -19,6 +20,8 @@ from PyQt6.QtWidgets import (
 )
 
 from core.filters import FilterSpec
+from gui.themes import THEMES
+from gui.settings import load_theme, save_theme
 from gui.workers import AnalysisWorker
 from gui.filter_widgets import FilterBuilderWidget
 from gui.deck_widgets import DeckConfigWidget
@@ -34,16 +37,47 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Card Combination Analyzer")
-        self.setMinimumSize(950, 720)
+        self.setMinimumSize(1100, 600)
         self._worker: Optional[AnalysisWorker] = None
         self._build_ui()
+        self._build_menu_bar()
+
+    def _build_menu_bar(self) -> None:
+        view_menu = self.menuBar().addMenu("View")
+
+        light_action = QAction("Light Mode", self, checkable=True)
+        dark_action  = QAction("Dark Mode",  self, checkable=True)
+
+        group = QActionGroup(self)
+        group.addAction(light_action)
+        group.addAction(dark_action)
+
+        light_action.triggered.connect(lambda: self._set_theme("light"))
+        dark_action.triggered.connect(lambda:  self._set_theme("dark"))
+
+        view_menu.addAction(light_action)
+        view_menu.addAction(dark_action)
+
+        self._light_action = light_action
+        self._dark_action  = dark_action
+        self._sync_theme_check()
+
+    def _sync_theme_check(self) -> None:
+        current = load_theme()
+        self._dark_action.setChecked(current == "dark")
+        self._light_action.setChecked(current != "dark")
+
+    def _set_theme(self, name: str) -> None:
+        save_theme(name)
+        QApplication.instance().setStyleSheet(THEMES[name])
+        self._sync_theme_check()
 
     def _build_ui(self) -> None:
         central = QWidget()
         self.setCentralWidget(central)
         root = QVBoxLayout(central)
 
-        splitter = QSplitter(Qt.Orientation.Vertical)
+        splitter = QSplitter(Qt.Orientation.Horizontal)
 
         # ---- Config panel (top half) ----
         config_widget = QWidget()
@@ -69,6 +103,7 @@ class MainWindow(QMainWindow):
         run_row = QHBoxLayout()
         self._run_btn   = QPushButton("Run Analysis")
         self._run_btn.setFixedHeight(36)
+        self._run_btn.setProperty("prominent", True)
         self._run_btn.clicked.connect(self._run_analysis)
         self._progress_bar   = QProgressBar()
         self._progress_bar.setRange(0, 0)          # indeterminate spinner
@@ -85,8 +120,11 @@ class MainWindow(QMainWindow):
         self._results = ResultsPanel()
         splitter.addWidget(self._results)
 
+        splitter.setCollapsible(1, True)
         splitter.setStretchFactor(0, 2)
         splitter.setStretchFactor(1, 3)
+        splitter.setSizes([10000, 0])
+        self._splitter = splitter
 
         root.addWidget(splitter)
         self.statusBar().showMessage("Ready  —  load a deck to begin.")
@@ -146,6 +184,9 @@ class MainWindow(QMainWindow):
 
         self._results.populate(stats, filter_spec)
         self._results.setCurrentIndex(0)
+        if self._splitter.sizes()[1] == 0:
+            w = self._splitter.width()
+            self._splitter.setSizes([int(w * 0.4), int(w * 0.6)])
 
         total    = stats["total_combinations"]
         filtered = stats["filtered_count"]
@@ -172,6 +213,7 @@ class MainWindow(QMainWindow):
 def main() -> None:
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
+    app.setStyleSheet(THEMES[load_theme()])
     window = MainWindow()
     window.show()
     sys.exit(app.exec())

@@ -24,7 +24,7 @@ from gui.table_model import (
     NumericItem,
     CombinationsTableModel,
     _build_matched_set,
-    _HIGHLIGHT_COLOR,
+    _highlight_color,
 )
 from gui.workers import SearchSortWorker
 
@@ -276,7 +276,7 @@ class ResultsPanel(QTabWidget):
 
             for col, item in enumerate([label_item, count_item, pct_item]):
                 if is_filter:
-                    item.setBackground(QBrush(_HIGHLIGHT_COLOR))
+                    item.setBackground(QBrush(_highlight_color()))
                 item.setTextAlignment(
                     Qt.AlignmentFlag.AlignVCenter
                     | (Qt.AlignmentFlag.AlignLeft if col == 0 else Qt.AlignmentFlag.AlignRight)
