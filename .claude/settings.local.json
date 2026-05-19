@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -c \"import card_combinations as cc; print\\('Card:', cc.Card\\({'rank':'Ace','suit':'Spades'}\\)\\); print\\('FilterSpec:', cc.FilterSpec\\('all:suit'\\)\\); print\\('All imports OK'\\)\")",
+      "Bash(python card_combinations.py -n 5 -f \"all:suit\")"
+    ]
+  }
+}
