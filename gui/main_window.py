@@ -44,28 +44,23 @@ class MainWindow(QMainWindow):
 
     def _build_menu_bar(self) -> None:
         theme_menu = self.menuBar().addMenu("Theme")
-
-        light_action = QAction("Light Mode", self, checkable=True)
-        dark_action  = QAction("Dark Mode",  self, checkable=True)
-
         group = QActionGroup(self)
-        group.addAction(light_action)
-        group.addAction(dark_action)
+        self._theme_actions: Dict[str, QAction] = {}
 
-        light_action.triggered.connect(lambda: self._set_theme("light"))
-        dark_action.triggered.connect(lambda:  self._set_theme("dark"))
+        for key in THEMES:
+            label = key.replace("_", " ").title()
+            action = QAction(label, self, checkable=True)
+            action.triggered.connect(lambda _, k=key: self._set_theme(k))
+            group.addAction(action)
+            theme_menu.addAction(action)
+            self._theme_actions[key] = action
 
-        theme_menu.addAction(light_action)
-        theme_menu.addAction(dark_action)
-
-        self._light_action = light_action
-        self._dark_action  = dark_action
         self._sync_theme_check()
 
     def _sync_theme_check(self) -> None:
         current = load_theme()
-        self._dark_action.setChecked(current == "dark")
-        self._light_action.setChecked(current != "dark")
+        for key, action in self._theme_actions.items():
+            action.setChecked(key == current)
 
     def _set_theme(self, name: str) -> None:
         save_theme(name)
