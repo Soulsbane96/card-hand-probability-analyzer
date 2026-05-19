@@ -122,7 +122,12 @@ def register_sequence_order(attr: str, ordered_values: List[str]) -> None:
 def get_sequence_order(attr: str) -> Optional[List[str]]:
     return _SEQUENCE_ORDER.get(attr.lower())
 
-def _is_consecutive(indices: List[int], wrap: bool, total: int) -> bool:
+def _is_consecutive(
+    indices: List[int],
+    wrap: bool,
+    total: int,
+    wrap_count: Optional[int] = None,
+) -> bool:
     s = sorted(indices)
     n = len(s)
     if n < 2:
@@ -138,7 +143,19 @@ def _is_consecutive(indices: List[int], wrap: bool, total: int) -> bool:
     # (i.e. total - (n-1) unit steps).
     cyclic_gaps = [s[i+1] - s[i] for i in range(n - 1)] + [total - s[-1] + s[0]]
     big = [g for g in cyclic_gaps if g != 1]
-    return len(big) == 1 and big[0] == total - (n - 1)
+    if len(big) != 1 or big[0] != total - (n - 1):
+        return False
+    # wrap_count limits how many cards from the END of the sequence may cross
+    # the wrap boundary into the beginning.  The "high group" is the run of
+    # cards that sit after the big gap in the sorted index list; a limit of 1
+    # allows only one high-end card to wrap (e.g. Ace-low A,2,3,4,5 is valid
+    # but Q,K,A,2,3 is not).
+    if wrap_count is not None:
+        big_gap_pos    = cyclic_gaps.index(big[0])
+        high_group_size = n - 1 - big_gap_pos
+        if high_group_size > wrap_count:
+            return False
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -364,6 +381,13 @@ class FilterToken:
         tok = self.raw
         lo  = tok.lower()
 
+        # "not:<token>"  — negate whatever token follows
+        self.negated = False
+        if lo.startswith("not:"):
+            self.negated = True
+            tok = tok[4:].strip()
+            lo  = tok.lower()
+
         # "all:<attr>"  — every card in the hand shares the same value (e.g. flush)
         if lo.startswith("all:"):
             self.kind = "all";  self.attr = tok[4:].strip();  return
@@ -372,15 +396,25 @@ class FilterToken:
         if lo.startswith("unique:"):
             self.kind = "unique";  self.attr = tok[7:].strip();  return
 
-        # "straight:<attr>" or "straight:<attr>:wrap"
+        # "straight:<attr>" or "straight:<attr>:wrap" or "straight:<attr>:wrap=N"
         # Values must form a consecutive run in the registered sequence order.
-        # Defaults to no-wrap; pass ":wrap" for circular (Ace-low) straights.
+        # Defaults to no-wrap; ":wrap" allows full circular straights; ":wrap=N"
+        # additionally caps how many cards from the END of the sequence may cross
+        # the wrap boundary (e.g. wrap=1 allows A,2,3,4,5 but not Q,K,A,2,3).
         if lo.startswith("straight:"):
-            rest  = tok[9:].split(":")
+            rest      = tok[9:].split(":")
             self.kind = "straight"
             self.attr = rest[0].strip()
-            flag = rest[1].lower() if len(rest) > 1 else "nowrap"
-            self.wrap = True if flag == "wrap" else False
+            self.wrap = False
+            self.wrap_count: Optional[int] = None
+            if len(rest) > 1:
+                flag = rest[1].strip().lower()
+                if flag.startswith("wrap"):
+                    self.wrap = True
+                    suffix = flag[4:]   # "" or "=N"
+                    if suffix.startswith("="):
+                        n = int(suffix[1:])
+                        self.wrap_count = n if n > 0 else None
             return
 
         # "pattern:<attr>=n1+n2+…"
@@ -420,11 +454,15 @@ class FilterToken:
 
         raise ValueError(
             f"Cannot parse filter token {tok!r}.\n"
-            "Valid forms: all:<attr>  unique:<attr>  straight:<attr>[:wrap|:nowrap]\n"
+            "Valid forms: all:<attr>  unique:<attr>  straight:<attr>[:wrap|:wrap=N|:nowrap]\n"
             "  pattern:<attr>=n+n  nof:<attr><op><n>  <attr>:<value><op><count>"
         )
 
     def matches(self, hand: Tuple[Card, ...]) -> bool:
+        result = self._eval(hand)
+        return (not result) if self.negated else result
+
+    def _eval(self, hand: Tuple[Card, ...]) -> bool:
         # All cards share the same value for this attribute (e.g. flush = all same suit)
         if self.kind == "all":
             return len({c.attr(self.attr) for c in hand}) == 1
@@ -446,7 +484,7 @@ class FilterToken:
             idx_map = {v: i for i, v in enumerate(order)}
             if any(v not in idx_map for v in vals):
                 return False
-            return _is_consecutive([idx_map[v] for v in vals], self.wrap, len(order))
+            return _is_consecutive([idx_map[v] for v in vals], self.wrap, len(order), self.wrap_count)
 
         # Frequency pattern: sorted counts of attr values must match self.pattern exactly
         # e.g. pattern (3,2) matches a hand where one value appears 3× and another 2×
@@ -471,17 +509,24 @@ class FilterToken:
         return False
 
     def describe(self) -> str:
-        if self.kind == "all":     return f"all same {self.attr}"
-        if self.kind == "unique":  return f"all distinct {self.attr}"
+        prefix = "NOT " if self.negated else ""
+        if self.kind == "all":     return f"{prefix}all same {self.attr}"
+        if self.kind == "unique":  return f"{prefix}all distinct {self.attr}"
         if self.kind == "straight":
-            return f"straight {self.attr} ({'wrap' if self.wrap else 'no wrap'})"
+            if not self.wrap:
+                wrap_desc = "no wrap"
+            elif self.wrap_count is not None:
+                wrap_desc = f"wrap ≤{self.wrap_count}"
+            else:
+                wrap_desc = "wrap"
+            return f"{prefix}straight {self.attr} ({wrap_desc})"
         if self.kind == "pattern":
-            return f"{self.attr} pattern {'+'.join(str(x) for x in self.pattern)}"
+            return f"{prefix}{self.attr} pattern {'+'.join(str(x) for x in self.pattern)}"
         if self.kind == "nof":
             op_word = {"=": "exactly", ">=": "at least", "<=": "at most"}[self.op]
-            return f"some {self.attr} appears {op_word} {self.count}×"
+            return f"{prefix}some {self.attr} appears {op_word} {self.count}×"
         op_word = {"=": "exactly", ">=": "at least", "<=": "at most"}[self.op]
-        return f"{op_word} {self.count} card(s) with {self.attr}={self.value!r}"
+        return f"{prefix}{op_word} {self.count} card(s) with {self.attr}={self.value!r}"
 
     def referenced_attrs(self) -> List[str]:
         return [self.attr.lower()]

@@ -15,9 +15,9 @@ from __future__ import annotations
 import itertools
 import math
 import sys
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
-from PyQt6.QtCore import Qt, QThread, pyqtSignal
+from PyQt6.QtCore import Qt, QAbstractTableModel, QModelIndex, QThread, QTimer, pyqtSignal
 from PyQt6.QtGui import QBrush, QColor, QFont
 from PyQt6.QtWidgets import (
     QApplication,
@@ -41,6 +41,7 @@ from PyQt6.QtWidgets import (
     QSplitter,
     QStackedWidget,
     QTabWidget,
+    QTableView,
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
@@ -125,6 +126,7 @@ class AnalysisWorker(QThread):
             warnings = cc.check_filter_warnings(filter_spec, hand_size) if filter_spec else []
             stats    = cc.compute_stats(combos, filter_spec, attr_names, hand_size)
 
+            stats["combinations"] = combos
             stats["warnings"]  = warnings
             stats["attr_names"] = attr_names
             stats["hand_size"] = hand_size
@@ -216,18 +218,41 @@ class FilterTokenWidget(QWidget):
         return w
 
     def _make_straight_page(self) -> QWidget:
-        """Page 1: straight — attribute + wrap checkbox."""
+        """Page 1: straight — attribute + wrap checkbox + optional wrap-count limit."""
         w = QWidget()
         h = QHBoxLayout(w)
         h.setContentsMargins(4, 0, 0, 0)
         self._straight_attr = self._attr_combo()
         self._straight_wrap = QCheckBox("Wrap-around")
         self._straight_wrap.stateChanged.connect(self.changed)
+        self._straight_wrap.stateChanged.connect(self._on_straight_wrap_changed)
+
+        self._straight_limit_label = QLabel("max wrap:")
+        self._straight_limit_label.setEnabled(False)
+        self._straight_wrap_count = QSpinBox()
+        self._straight_wrap_count.setRange(0, 20)
+        self._straight_wrap_count.setValue(0)
+        self._straight_wrap_count.setSpecialValueText("∞")   # ∞ for 0
+        self._straight_wrap_count.setEnabled(False)
+        self._straight_wrap_count.setToolTip(
+            "Maximum cards from the END of the sequence that may cross the wrap boundary.\n"
+            "∞ (0) = full circular wrap (e.g. both A,2,3,4,5 and Q,K,A,2,3 are valid)\n"
+            "1 = only one high-end card wraps (e.g. A,2,3,4,5 valid; Q,K,A,2,3 excluded)"
+        )
+        self._straight_wrap_count.valueChanged.connect(self.changed)
+
         h.addWidget(QLabel("attribute:"))
         h.addWidget(self._straight_attr)
         h.addWidget(self._straight_wrap)
+        h.addWidget(self._straight_limit_label)
+        h.addWidget(self._straight_wrap_count)
         h.addStretch()
         return w
+
+    def _on_straight_wrap_changed(self, state: int) -> None:
+        enabled = bool(state)
+        self._straight_limit_label.setEnabled(enabled)
+        self._straight_wrap_count.setEnabled(enabled)
 
     def _make_pattern_page(self) -> QWidget:
         """Page 2: pattern — attribute + free-form pattern string."""
@@ -304,6 +329,11 @@ class FilterTokenWidget(QWidget):
         outer = QHBoxLayout(self)
         outer.setContentsMargins(0, 2, 0, 2)
         outer.setSpacing(4)
+
+        self._not_check = QCheckBox("NOT")
+        self._not_check.setToolTip("Negate this condition (exclude hands that match it)")
+        self._not_check.stateChanged.connect(self.changed)
+        outer.addWidget(self._not_check)
 
         self._type_combo = QComboBox()
         self._type_combo.setMinimumWidth(120)
@@ -383,40 +413,47 @@ class FilterTokenWidget(QWidget):
             t = combo.currentText()
             return "" if t in ("", "(load deck first)") else t
 
+        token = ""
         if kind == "all":
             a = _attr(self._simple_attr)
-            return f"all:{a}" if a else ""
+            token = f"all:{a}" if a else ""
 
-        if kind == "unique":
+        elif kind == "unique":
             a = _attr(self._simple_attr)
-            return f"unique:{a}" if a else ""
+            token = f"unique:{a}" if a else ""
 
-        if kind == "straight":
-            a    = _attr(self._straight_attr)
-            wrap = ":wrap" if self._straight_wrap.isChecked() else ""
-            return f"straight:{a}{wrap}" if a else ""
+        elif kind == "straight":
+            a = _attr(self._straight_attr)
+            if not a:
+                token = ""
+            elif not self._straight_wrap.isChecked():
+                token = f"straight:{a}"
+            else:
+                n = self._straight_wrap_count.value()
+                token = f"straight:{a}:wrap={n}" if n > 0 else f"straight:{a}:wrap"
 
-        if kind == "pattern":
+        elif kind == "pattern":
             a   = _attr(self._pattern_attr)
             pat = self._pattern_edit.text().strip()
-            return f"pattern:{a}={pat}" if a and pat else ""
+            token = f"pattern:{a}={pat}" if a and pat else ""
 
-        if kind == "nof":
+        elif kind == "nof":
             a  = _attr(self._nof_attr)
             op = self._nof_op.currentText()
             n  = self._nof_count.value()
-            return f"nof:{a}{op}{n}" if a else ""
+            token = f"nof:{a}{op}{n}" if a else ""
 
-        if kind == "count":
+        elif kind == "count":
             a   = _attr(self._count_attr)
             val = self._count_value.currentText()
-            if not a or not val or val == "(load deck first)":
-                return ""
-            op = self._count_op.currentText()
-            n  = self._count_spin_w.value()
-            return f"{a}:{val}{op}{n}"
+            if a and val and val != "(load deck first)":
+                op = self._count_op.currentText()
+                n  = self._count_spin_w.value()
+                token = f"{a}:{val}{op}{n}"
 
-        return ""
+        if token and self._not_check.isChecked():
+            token = f"not:{token}"
+        return token
 
 
 # ---------------------------------------------------------------------------
@@ -967,10 +1004,351 @@ class OptionsWidget(QGroupBox):
 
 
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# All Combinations viewer  (virtual model/view for large datasets)
+# ---------------------------------------------------------------------------
+
+def _build_matched_set(
+    combinations: List[Tuple],
+    filtered_hands: List[Tuple],
+) -> frozenset:
+    """Return a frozenset of indices into combinations that appear in filtered_hands.
+
+    Uses object identity (id()) because compute_stats() stores the same tuple
+    references — no copies are made.
+    """
+    id_to_idx = {id(h): i for i, h in enumerate(combinations)}
+    return frozenset(
+        id_to_idx[id(h)] for h in filtered_hands if id(h) in id_to_idx
+    )
+
+
+class CombinationsTableModel(QAbstractTableModel):
+    """Virtual table model for all combinations.  Only visible rows are ever
+    touched by Qt, so memory and paint cost are independent of dataset size."""
+
+    def __init__(self, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self._combinations: List[Tuple] = []
+        self._display_indices: List[int] = []
+        self._matched_indices: frozenset = frozenset()
+        self._hand_size: int = 0
+        self._label_col: Optional[str] = None
+        self._sort_col: int = -1
+        self._sort_order: Qt.SortOrder = Qt.SortOrder.AscendingOrder
+
+    # ------------------------------------------------------------------
+    # QAbstractTableModel interface
+    # ------------------------------------------------------------------
+
+    def rowCount(self, parent: QModelIndex = QModelIndex()) -> int:
+        return len(self._display_indices)
+
+    def columnCount(self, parent: QModelIndex = QModelIndex()) -> int:
+        return self._hand_size
+
+    def data(self, index: QModelIndex, role: int = Qt.ItemDataRole.DisplayRole) -> Any:
+        if not index.isValid():
+            return None
+        row, col = index.row(), index.column()
+        if row >= len(self._display_indices) or col >= self._hand_size:
+            return None
+
+        orig_idx = self._display_indices[row]
+
+        if role == Qt.ItemDataRole.DisplayRole:
+            return self._combinations[orig_idx][col].label(self._label_col)
+
+        if role == Qt.ItemDataRole.BackgroundRole:
+            if orig_idx in self._matched_indices:
+                return QBrush(_HIGHLIGHT_COLOR)
+            return None
+
+        if role == Qt.ItemDataRole.TextAlignmentRole:
+            return Qt.AlignmentFlag.AlignCenter
+
+        return None
+
+    def headerData(
+        self,
+        section: int,
+        orientation: Qt.Orientation,
+        role: int = Qt.ItemDataRole.DisplayRole,
+    ) -> Any:
+        if role != Qt.ItemDataRole.DisplayRole:
+            return None
+        if orientation == Qt.Orientation.Horizontal:
+            return f"Card {section + 1}"
+        return str(section + 1)
+
+    # ------------------------------------------------------------------
+    # Data management
+    # ------------------------------------------------------------------
+
+    def update_data(
+        self,
+        combinations: List[Tuple],
+        matched_indices: frozenset,
+        hand_size: int,
+        label_col: Optional[str],
+    ) -> None:
+        self.beginResetModel()
+        self._combinations = combinations
+        self._matched_indices = matched_indices
+        self._hand_size = hand_size
+        self._label_col = label_col
+        self._display_indices = list(range(len(combinations)))
+        self._sort_col = -1
+        self._sort_order = Qt.SortOrder.AscendingOrder
+        self.endResetModel()
+
+    def apply_results(self, new_indices: List[int]) -> None:
+        self.beginResetModel()
+        self._display_indices = new_indices
+        self.endResetModel()
+
+
+class SearchSortWorker(QThread):
+    """Off-thread search and sort so the UI never freezes on large datasets."""
+
+    finished = pyqtSignal(list)
+    aborted  = pyqtSignal()
+
+    def __init__(
+        self,
+        combinations: List[Tuple],
+        matched_indices: frozenset,
+        search_text: str,
+        show_only_matches: bool,
+        sort_col: int,
+        sort_order: Qt.SortOrder,
+        hand_size: int,
+        label_col: Optional[str],
+        parent: Optional[QWidget] = None,
+    ) -> None:
+        super().__init__(parent)
+        self._combinations     = combinations
+        self._matched_indices  = matched_indices
+        self._search_text      = search_text.lower()
+        self._show_only        = show_only_matches
+        self._sort_col         = sort_col
+        self._sort_order       = sort_order
+        self._hand_size        = hand_size
+        self._label_col        = label_col
+        self._abort            = False
+
+    def abort(self) -> None:
+        self._abort = True
+
+    def run(self) -> None:
+        combos = self._combinations
+        lc     = self._label_col
+
+        # Build candidate pool
+        if self._show_only:
+            candidates = sorted(self._matched_indices)
+        else:
+            candidates = list(range(len(combos)))
+
+        # Text filter
+        text = self._search_text
+        if text:
+            filtered: List[int] = []
+            for i, idx in enumerate(candidates):
+                if self._abort:
+                    self.aborted.emit()
+                    return
+                if any(text in card.label(lc).lower() for card in combos[idx]):
+                    filtered.append(idx)
+                if i % 50_000 == 0 and self._abort:
+                    self.aborted.emit()
+                    return
+            candidates = filtered
+
+        # Sort
+        if self._sort_col >= 0 and not self._abort:
+            col     = self._sort_col
+            reverse = self._sort_order == Qt.SortOrder.DescendingOrder
+            candidates.sort(
+                key=lambda i: combos[i][col].label(lc).lower(),
+                reverse=reverse,
+            )
+
+        if self._abort:
+            self.aborted.emit()
+            return
+
+        self.finished.emit(candidates)
+
+
+class AllCombinationsWidget(QWidget):
+    """Tab widget that shows all combinations with search, sort, and filter-match
+    highlighting.  Uses CombinationsTableModel (virtual) so row count has no
+    impact on memory or initial paint time."""
+
+    def __init__(self, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self._worker: Optional[SearchSortWorker] = None
+        self._pending_search: str = ""
+        self._pending_show_matches: bool = False
+        self._build_ui()
+
+    def _build_ui(self) -> None:
+        self._model = CombinationsTableModel(self)
+
+        self._view = QTableView()
+        self._view.setModel(self._model)
+        self._view.setSortingEnabled(False)
+        self._view.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self._view.setSelectionBehavior(QTableView.SelectionBehavior.SelectRows)
+        self._view.setEditTriggers(QTableView.EditTrigger.NoEditTriggers)
+        self._view.setAlternatingRowColors(False)
+        self._view.horizontalHeader().sectionClicked.connect(self._on_header_clicked)
+
+        self._search_edit = QLineEdit()
+        self._search_edit.setPlaceholderText("Search…")
+        self._search_edit.setMaximumWidth(280)
+        self._search_edit.textChanged.connect(self._on_search_changed)
+
+        self._matches_only_check = QCheckBox("Show only matches")
+        self._matches_only_check.stateChanged.connect(self._on_matches_only_changed)
+
+        self._count_label = QLabel("No combinations loaded.")
+
+        self._debounce_timer = QTimer(self)
+        self._debounce_timer.setSingleShot(True)
+        self._debounce_timer.timeout.connect(self._on_debounce_fired)
+
+        toolbar = QHBoxLayout()
+        toolbar.addWidget(QLabel("Search:"))
+        toolbar.addWidget(self._search_edit)
+        toolbar.addSpacing(12)
+        toolbar.addWidget(self._matches_only_check)
+        toolbar.addStretch()
+        toolbar.addWidget(self._count_label)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(4, 4, 4, 4)
+        layout.addLayout(toolbar)
+        layout.addWidget(self._view)
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
+    def populate(
+        self,
+        combinations: List[Tuple],
+        matched_indices: frozenset,
+        hand_size: int,
+        label_col: Optional[str],
+    ) -> None:
+        self._abort_worker()
+        self._model.update_data(combinations, matched_indices, hand_size, label_col)
+        self._search_edit.blockSignals(True)
+        self._search_edit.clear()
+        self._search_edit.blockSignals(False)
+        self._matches_only_check.blockSignals(True)
+        self._matches_only_check.setChecked(False)
+        self._matches_only_check.setEnabled(bool(matched_indices))
+        self._matches_only_check.blockSignals(False)
+        self._pending_search = ""
+        self._pending_show_matches = False
+        self._trigger_search_sort("", False, -1, Qt.SortOrder.AscendingOrder)
+
+    # ------------------------------------------------------------------
+    # Slots
+    # ------------------------------------------------------------------
+
+    def _on_search_changed(self, text: str) -> None:
+        self._pending_search = text
+        self._debounce_timer.start(300)
+
+    def _on_matches_only_changed(self, state: int) -> None:
+        self._pending_show_matches = bool(state)
+        self._debounce_timer.stop()
+        self._fire_search()
+
+    def _on_debounce_fired(self) -> None:
+        self._fire_search()
+
+    def _on_header_clicked(self, logical_index: int) -> None:
+        if self._model._sort_col == logical_index:
+            order = (
+                Qt.SortOrder.DescendingOrder
+                if self._model._sort_order == Qt.SortOrder.AscendingOrder
+                else Qt.SortOrder.AscendingOrder
+            )
+        else:
+            order = Qt.SortOrder.AscendingOrder
+        self._model._sort_col   = logical_index
+        self._model._sort_order = order
+        self._view.horizontalHeader().setSortIndicator(logical_index, order)
+        self._view.horizontalHeader().setSortIndicatorShown(True)
+        self._debounce_timer.stop()
+        self._trigger_search_sort(
+            self._pending_search,
+            self._pending_show_matches,
+            logical_index,
+            order,
+        )
+
+    def _on_worker_finished(self, indices: list) -> None:
+        self._model.apply_results(indices)
+        self._update_count_label()
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+
+    def _fire_search(self) -> None:
+        self._trigger_search_sort(
+            self._pending_search,
+            self._pending_show_matches,
+            self._model._sort_col,
+            self._model._sort_order,
+        )
+
+    def _trigger_search_sort(
+        self,
+        search_text: str,
+        show_only_matches: bool,
+        sort_col: int,
+        sort_order: Qt.SortOrder,
+    ) -> None:
+        self._abort_worker()
+        if not self._model._combinations:
+            return
+        self._worker = SearchSortWorker(
+            self._model._combinations,
+            self._model._matched_indices,
+            search_text,
+            show_only_matches,
+            sort_col,
+            sort_order,
+            self._model._hand_size,
+            self._model._label_col,
+        )
+        self._worker.finished.connect(self._on_worker_finished)
+        self._worker.start()
+
+    def _abort_worker(self) -> None:
+        if self._worker and self._worker.isRunning():
+            self._worker.abort()
+            self._worker.wait()
+        self._worker = None
+
+    def _update_count_label(self) -> None:
+        showing = len(self._model._display_indices)
+        total   = len(self._model._combinations)
+        self._count_label.setText(f"Showing {showing:,} of {total:,} combinations")
+
+
+# ---------------------------------------------------------------------------
 # Results panel  (tabbed: Statistics / Attribute Frequency / Matching Hands)
 # ---------------------------------------------------------------------------
 
-_HIGHLIGHT_COLOR = QColor(173, 216, 230)   # light blue for filter rows
+_HIGHLIGHT_COLOR = QColor(230, 130, 0)   # orange for filter rows
 
 
 class ResultsPanel(QTabWidget):
@@ -1010,6 +1388,10 @@ class ResultsPanel(QTabWidget):
         )
         self.addTab(self._hands_text, "Matching Hands")
 
+        # ---- All Combinations ----
+        self._all_combos_widget = AllCombinationsWidget()
+        self.addTab(self._all_combos_widget, "All Combinations")
+
     # ------------------------------------------------------------------
     # Population methods
     # ------------------------------------------------------------------
@@ -1018,6 +1400,7 @@ class ResultsPanel(QTabWidget):
         self._populate_stats(stats, filter_spec)
         self._populate_freq(stats)
         self._populate_hands(stats)
+        self._populate_all_combos(stats, filter_spec)
 
     def _populate_stats(
         self,
@@ -1110,6 +1493,23 @@ class ResultsPanel(QTabWidget):
             lines.append("No hands match the current filter.")
 
         self._hands_text.setPlainText("\n".join(lines))
+
+    def _populate_all_combos(
+        self,
+        stats: dict,
+        filter_spec: Optional[cc.FilterSpec],
+    ) -> None:
+        combinations   = stats.get("combinations", [])
+        filtered_hands = stats.get("filtered_hands", [])
+        hand_size      = stats.get("hand_size", 0)
+        label_col      = stats.get("label_col")
+
+        if filter_spec is None:
+            matched_indices: frozenset = frozenset()
+        else:
+            matched_indices = _build_matched_set(combinations, filtered_hands)
+
+        self._all_combos_widget.populate(combinations, matched_indices, hand_size, label_col)
 
 
 # ---------------------------------------------------------------------------
