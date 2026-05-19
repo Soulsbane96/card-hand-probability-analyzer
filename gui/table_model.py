@@ -6,10 +6,12 @@ from PyQt6.QtCore import Qt, QAbstractTableModel, QModelIndex
 from PyQt6.QtGui import QBrush, QColor
 from PyQt6.QtWidgets import QTableWidgetItem, QWidget
 
+from gui.settings import load_theme
+from gui.themes import HIGHLIGHT_COLORS
 
-# Shared highlight colour for filter-matching rows in both the stats table
-# and the all-combinations virtual view.
-_HIGHLIGHT_COLOR = QColor(230, 130, 0)
+
+def _highlight_color() -> QColor:
+    return QColor(HIGHLIGHT_COLORS[load_theme()])
 
 
 # ---------------------------------------------------------------------------
@@ -91,7 +93,7 @@ class CombinationsTableModel(QAbstractTableModel):
 
         if role == Qt.ItemDataRole.BackgroundRole:
             if orig_idx in self._matched_indices:
-                return QBrush(_HIGHLIGHT_COLOR)
+                return QBrush(_highlight_color())
             return None
 
         if role == Qt.ItemDataRole.TextAlignmentRole:

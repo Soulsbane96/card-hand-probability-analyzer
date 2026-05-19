@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Dict, List, Optional
 
-from PyQt6.QtCore import pyqtSignal
+from PyQt6.QtCore import pyqtSignal, Qt
 from PyQt6.QtGui import QFont
 from PyQt6.QtWidgets import (
     QCheckBox,
@@ -13,16 +13,13 @@ from PyQt6.QtWidgets import (
     QLineEdit,
     QPushButton,
     QScrollArea,
+    QSizePolicy,
     QSpinBox,
     QStackedWidget,
     QVBoxLayout,
     QWidget,
 )
 
-
-# ---------------------------------------------------------------------------
-# Filter token widget  (one AND-condition row)
-# ---------------------------------------------------------------------------
 
 _TOKEN_TYPES: List[tuple] = [
     ("All Same",     "all"),
@@ -33,7 +30,7 @@ _TOKEN_TYPES: List[tuple] = [
     ("Value Count",  "count"),
 ]
 
-# Map kind → stack page index
+# Map kind → stack page index (0 = no extra params needed)
 _KIND_PAGE = {
     "all": 0, "unique": 0,
     "straight": 1,
@@ -42,6 +39,12 @@ _KIND_PAGE = {
     "count": 4,
 }
 
+
+# ---------------------------------------------------------------------------
+# Filter token widget  (one AND-condition)
+# Row 1: NOT | type | attr | ✕
+# Row 2: type-specific extra controls (hidden for all/unique)
+# ---------------------------------------------------------------------------
 
 class FilterTokenWidget(QWidget):
     changed          = pyqtSignal()
@@ -59,21 +62,13 @@ class FilterTokenWidget(QWidget):
         self._build_ui()
 
     # ------------------------------------------------------------------
-    # UI construction helpers
+    # Small widget helpers
     # ------------------------------------------------------------------
-
-    def _attr_combo(self) -> QComboBox:
-        cb = QComboBox()
-        if self.attr_names:
-            cb.addItems(self.attr_names)
-        else:
-            cb.addItem("(load deck first)")
-        cb.currentIndexChanged.connect(self.changed)
-        return cb
 
     def _op_combo(self) -> QComboBox:
         cb = QComboBox()
         cb.addItems(["=", ">=", "<="])
+        cb.setFixedWidth(52)
         cb.currentIndexChanged.connect(self.changed)
         return cb
 
@@ -81,40 +76,30 @@ class FilterTokenWidget(QWidget):
         sp = QSpinBox()
         sp.setRange(1, 99)
         sp.setValue(1)
+        sp.setFixedWidth(52)
         sp.valueChanged.connect(self.changed)
         return sp
 
     # ------------------------------------------------------------------
-    # Stack pages
+    # Stack pages — extra params only, attr is in row 1
     # ------------------------------------------------------------------
 
-    def _make_simple_page(self) -> QWidget:
-        """Page 0: all / unique — attribute selector only."""
-        w = QWidget()
-        h = QHBoxLayout(w)
-        h.setContentsMargins(4, 0, 0, 0)
-        self._simple_attr = self._attr_combo()
-        h.addWidget(QLabel("attribute:"))
-        h.addWidget(self._simple_attr)
-        h.addStretch()
-        return w
-
     def _make_straight_page(self) -> QWidget:
-        """Page 1: straight — attribute + wrap checkbox + optional wrap-count limit."""
         w = QWidget()
         h = QHBoxLayout(w)
-        h.setContentsMargins(4, 0, 0, 0)
-        self._straight_attr = self._attr_combo()
-        self._straight_wrap = QCheckBox("Wrap-around")
+        h.setContentsMargins(0, 0, 0, 0)
+        h.setSpacing(4)
+        self._straight_wrap = QCheckBox("Wrap")
         self._straight_wrap.stateChanged.connect(self.changed)
         self._straight_wrap.stateChanged.connect(self._on_straight_wrap_changed)
 
-        self._straight_limit_label = QLabel("max wrap:")
+        self._straight_limit_label = QLabel("limit:")
         self._straight_limit_label.setEnabled(False)
         self._straight_wrap_count = QSpinBox()
         self._straight_wrap_count.setRange(0, 20)
         self._straight_wrap_count.setValue(0)
-        self._straight_wrap_count.setSpecialValueText("∞")   # ∞ for 0
+        self._straight_wrap_count.setSpecialValueText("∞")
+        self._straight_wrap_count.setFixedWidth(52)
         self._straight_wrap_count.setEnabled(False)
         self._straight_wrap_count.setToolTip(
             "Maximum cards from the END of the sequence that may cross the wrap boundary.\n"
@@ -123,8 +108,6 @@ class FilterTokenWidget(QWidget):
         )
         self._straight_wrap_count.valueChanged.connect(self.changed)
 
-        h.addWidget(QLabel("attribute:"))
-        h.addWidget(self._straight_attr)
         h.addWidget(self._straight_wrap)
         h.addWidget(self._straight_limit_label)
         h.addWidget(self._straight_wrap_count)
@@ -137,70 +120,57 @@ class FilterTokenWidget(QWidget):
         self._straight_wrap_count.setEnabled(enabled)
 
     def _make_pattern_page(self) -> QWidget:
-        """Page 2: pattern — attribute + free-form pattern string."""
         w = QWidget()
         v = QVBoxLayout(w)
-        v.setContentsMargins(4, 0, 0, 0)
-        v.setSpacing(2)
+        v.setContentsMargins(0, 0, 0, 0)
+        v.setSpacing(1)
 
         row = QHBoxLayout()
-        self._pattern_attr = self._attr_combo()
+        row.setSpacing(4)
         self._pattern_edit = QLineEdit()
-        self._pattern_edit.setPlaceholderText("e.g. 3+2  or  2+2+1")
-        self._pattern_edit.setMaximumWidth(120)
+        self._pattern_edit.setPlaceholderText("e.g. 3+2")
+        self._pattern_edit.setMaximumWidth(90)
         self._pattern_edit.textChanged.connect(self.changed)
-        row.addWidget(QLabel("attribute:"))
-        row.addWidget(self._pattern_attr)
-        row.addWidget(QLabel("pattern:"))
+        row.addWidget(QLabel("pat:"))
         row.addWidget(self._pattern_edit)
         row.addStretch()
         v.addLayout(row)
 
-        hint = QLabel("Numbers must sum to hand size (e.g. 3+2 for a 5-card hand)")
-        hint.setStyleSheet("color: gray; font-size: 10px;")
+        hint = QLabel("Numbers must sum to hand size")
+        hint.setObjectName("hintLabel")
         v.addWidget(hint)
         return w
 
     def _make_nof_page(self) -> QWidget:
-        """Page 3: nof — attribute + operator + count."""
         w = QWidget()
         h = QHBoxLayout(w)
-        h.setContentsMargins(4, 0, 0, 0)
-        self._nof_attr  = self._attr_combo()
+        h.setContentsMargins(0, 0, 0, 0)
+        h.setSpacing(4)
         self._nof_op    = self._op_combo()
         self._nof_count = self._count_spin()
-        h.addWidget(QLabel("attribute:"))
-        h.addWidget(self._nof_attr)
-        h.addWidget(QLabel("one value appears"))
+        h.addWidget(QLabel("has"))
         h.addWidget(self._nof_op)
         h.addWidget(self._nof_count)
-        h.addWidget(QLabel("times"))
+        h.addWidget(QLabel("same"))
         h.addStretch()
         return w
 
     def _make_count_page(self) -> QWidget:
-        """Page 4: count — attribute + specific value + operator + count."""
         w = QWidget()
         h = QHBoxLayout(w)
-        h.setContentsMargins(4, 0, 0, 0)
-        self._count_attr  = self._attr_combo()
+        h.setContentsMargins(0, 0, 0, 0)
+        h.setSpacing(4)
         self._count_value = QComboBox()
         if not self.attr_names:
             self._count_value.addItem("(load deck first)")
         self._count_value.currentIndexChanged.connect(self.changed)
-        self._count_op   = self._op_combo()
+        self._count_op     = self._op_combo()
         self._count_spin_w = self._count_spin()
 
-        h.addWidget(QLabel("attribute:"))
-        h.addWidget(self._count_attr)
-        h.addWidget(QLabel("value:"))
         h.addWidget(self._count_value)
-        h.addWidget(QLabel("count"))
         h.addWidget(self._count_op)
         h.addWidget(self._count_spin_w)
         h.addStretch()
-
-        self._count_attr.currentIndexChanged.connect(self._refresh_value_combo)
         return w
 
     # ------------------------------------------------------------------
@@ -208,35 +178,53 @@ class FilterTokenWidget(QWidget):
     # ------------------------------------------------------------------
 
     def _build_ui(self) -> None:
-        outer = QHBoxLayout(self)
-        outer.setContentsMargins(0, 2, 0, 2)
-        outer.setSpacing(4)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 1, 0, 1)
+        outer.setSpacing(2)
 
-        self._not_check = QCheckBox("NOT")
-        self._not_check.setToolTip("Negate this condition (exclude hands that match it)")
-        self._not_check.stateChanged.connect(self.changed)
-        outer.addWidget(self._not_check)
-
-        self._type_combo = QComboBox()
-        self._type_combo.setMinimumWidth(120)
-        for label, kind in _TOKEN_TYPES:
-            self._type_combo.addItem(label, kind)
-        self._type_combo.currentIndexChanged.connect(self._on_type_changed)
-        outer.addWidget(self._type_combo)
-
+        # Build stack pages first so _count_value exists before _attr_select signals fire
         self._stack = QStackedWidget()
-        self._stack.addWidget(self._make_simple_page())    # 0
+        self._stack.addWidget(QWidget())                   # 0: all/unique — no extras
         self._stack.addWidget(self._make_straight_page())  # 1
         self._stack.addWidget(self._make_pattern_page())   # 2
         self._stack.addWidget(self._make_nof_page())       # 3
         self._stack.addWidget(self._make_count_page())     # 4
-        outer.addWidget(self._stack, 1)
+
+        # Row 1: NOT | type | attr | ✕
+        top_row = QHBoxLayout()
+        top_row.setSpacing(4)
+
+        self._not_check = QCheckBox("NOT")
+        self._not_check.setToolTip("Negate this condition (exclude hands that match it)")
+        self._not_check.stateChanged.connect(self.changed)
+        top_row.addWidget(self._not_check)
+
+        self._type_combo = QComboBox()
+        for label, kind in _TOKEN_TYPES:
+            self._type_combo.addItem(label, kind)
+        self._type_combo.currentIndexChanged.connect(self._on_type_changed)
+        top_row.addWidget(self._type_combo)
+
+        self._attr_select = QComboBox()
+        if self.attr_names:
+            self._attr_select.addItems(self.attr_names)
+        else:
+            self._attr_select.addItem("(load deck first)")
+        self._attr_select.currentIndexChanged.connect(self.changed)
+        self._attr_select.currentIndexChanged.connect(self._refresh_value_combo)
+        top_row.addWidget(self._attr_select)
+        top_row.addStretch(1)
 
         remove_btn = QPushButton("✕")
         remove_btn.setFixedWidth(28)
         remove_btn.setToolTip("Remove this condition")
+        remove_btn.setProperty("danger", True)
         remove_btn.clicked.connect(lambda: self.remove_requested.emit(self))
-        outer.addWidget(remove_btn)
+        top_row.addWidget(remove_btn)
+        outer.addLayout(top_row)
+
+        # Row 2: extra parameters (hidden for all/unique)
+        outer.addWidget(self._stack)
 
         self._on_type_changed(0)
 
@@ -246,11 +234,13 @@ class FilterTokenWidget(QWidget):
 
     def _on_type_changed(self, idx: int) -> None:
         kind = _TOKEN_TYPES[idx][1]
-        self._stack.setCurrentIndex(_KIND_PAGE.get(kind, 0))
+        page = _KIND_PAGE.get(kind, 0)
+        self._stack.setCurrentIndex(page)
+        self._stack.setVisible(page != 0)
         self.changed.emit()
 
     def _refresh_value_combo(self) -> None:
-        attr   = self._count_attr.currentText()
+        attr   = self._attr_select.currentText()
         values = self.attr_values.get(attr, [])
         self._count_value.blockSignals(True)
         self._count_value.clear()
@@ -272,17 +262,10 @@ class FilterTokenWidget(QWidget):
     ) -> None:
         self.attr_names  = attr_names
         self.attr_values = attr_values
-        for combo in (
-            self._simple_attr,
-            self._straight_attr,
-            self._pattern_attr,
-            self._nof_attr,
-            self._count_attr,
-        ):
-            combo.blockSignals(True)
-            combo.clear()
-            combo.addItems(attr_names)
-            combo.blockSignals(False)
+        self._attr_select.blockSignals(True)
+        self._attr_select.clear()
+        self._attr_select.addItems(attr_names)
+        self._attr_select.blockSignals(False)
         self._refresh_value_combo()
         self.changed.emit()
 
@@ -291,21 +274,17 @@ class FilterTokenWidget(QWidget):
         idx  = self._type_combo.currentIndex()
         kind = _TOKEN_TYPES[idx][1]
 
-        def _attr(combo: QComboBox) -> str:
-            t = combo.currentText()
-            return "" if t in ("", "(load deck first)") else t
+        t = self._attr_select.currentText()
+        a = "" if t in ("", "(load deck first)") else t
 
         token = ""
         if kind == "all":
-            a = _attr(self._simple_attr)
             token = f"all:{a}" if a else ""
 
         elif kind == "unique":
-            a = _attr(self._simple_attr)
             token = f"unique:{a}" if a else ""
 
         elif kind == "straight":
-            a = _attr(self._straight_attr)
             if not a:
                 token = ""
             elif not self._straight_wrap.isChecked():
@@ -315,18 +294,15 @@ class FilterTokenWidget(QWidget):
                 token = f"straight:{a}:wrap={n}" if n > 0 else f"straight:{a}:wrap"
 
         elif kind == "pattern":
-            a   = _attr(self._pattern_attr)
             pat = self._pattern_edit.text().strip()
             token = f"pattern:{a}={pat}" if a and pat else ""
 
         elif kind == "nof":
-            a  = _attr(self._nof_attr)
             op = self._nof_op.currentText()
             n  = self._nof_count.value()
             token = f"nof:{a}{op}{n}" if a else ""
 
         elif kind == "count":
-            a   = _attr(self._count_attr)
             val = self._count_value.currentText()
             if a and val and val != "(load deck first)":
                 op = self._count_op.currentText()
@@ -339,7 +315,7 @@ class FilterTokenWidget(QWidget):
 
 
 # ---------------------------------------------------------------------------
-# Filter clause widget  (one OR-group of AND-tokens)
+# Filter clause widget  (one OR-group) — compact card, fixed width
 # ---------------------------------------------------------------------------
 
 class FilterClauseWidget(QGroupBox):
@@ -353,31 +329,36 @@ class FilterClauseWidget(QGroupBox):
         attr_values: Dict[str, List[str]] = (),
         parent:      Optional[QWidget]    = None,
     ):
-        super().__init__(f"Clause {clause_num}  (OR)", parent)
+        super().__init__(f"OR Clause {clause_num}", parent)
         self.attr_names  = list(attr_names)
         self.attr_values = dict(attr_values)
         self._tokens: List[FilterTokenWidget] = []
+        self.setFixedWidth(360)
+        self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Minimum)
         self._build_ui()
 
     def _build_ui(self) -> None:
         self._outer = QVBoxLayout(self)
+        self._outer.setContentsMargins(6, 4, 6, 6)
         self._outer.setSpacing(4)
 
-        # Header: remove button
+        # Header: remove button right-aligned
         hdr = QHBoxLayout()
         hdr.addStretch()
-        remove_btn = QPushButton("✕ Remove Clause")
+        remove_btn = QPushButton("Remove")
+        remove_btn.setProperty("danger", True)
         remove_btn.clicked.connect(lambda: self.remove_requested.emit(self))
         hdr.addWidget(remove_btn)
         self._outer.addLayout(hdr)
 
         # Token rows
         self._token_layout = QVBoxLayout()
-        self._token_layout.setSpacing(2)
+        self._token_layout.setSpacing(4)
         self._outer.addLayout(self._token_layout)
 
         # Add condition button
-        add_btn = QPushButton("+ Add Condition (AND)")
+        add_btn = QPushButton("+ AND Condition")
+        add_btn.setProperty("secondary", True)
         add_btn.clicked.connect(self._add_token)
         self._outer.addWidget(add_btn)
 
@@ -415,7 +396,7 @@ class FilterClauseWidget(QGroupBox):
 
 
 # ---------------------------------------------------------------------------
-# Filter builder widget  (manages OR-clauses + generated string display)
+# Filter builder widget — horizontal scrolling card row
 # ---------------------------------------------------------------------------
 
 class FilterBuilderWidget(QWidget):
@@ -423,34 +404,40 @@ class FilterBuilderWidget(QWidget):
 
     def __init__(self, parent: Optional[QWidget] = None):
         super().__init__(parent)
-        self._clauses:    List[FilterClauseWidget] = []
-        self._attr_names: List[str]                = []
-        self._attr_values: Dict[str, List[str]]    = {}
+        self._clauses:     List[FilterClauseWidget] = []
+        self._attr_names:  List[str]                = []
+        self._attr_values: Dict[str, List[str]]     = {}
         self._build_ui()
 
     def _build_ui(self) -> None:
         layout = QVBoxLayout(self)
         layout.setSpacing(6)
+        layout.setContentsMargins(0, 0, 0, 0)
 
-        # Scrollable clause area
+        # Horizontally scrollable clause card row
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
-        scroll.setMinimumHeight(160)
+        scroll.setMinimumHeight(220)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
 
         self._clause_container = QWidget()
-        self._clause_layout    = QVBoxLayout(self._clause_container)
+        self._clause_container.setObjectName("clauseContainer")
+        self._clause_layout    = QHBoxLayout(self._clause_container)
         self._clause_layout.setSpacing(8)
+        self._clause_layout.setContentsMargins(4, 4, 4, 4)
+        self._clause_layout.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
         self._clause_layout.addStretch()
         scroll.setWidget(self._clause_container)
         layout.addWidget(scroll)
 
-        add_btn = QPushButton("+ Add Clause (OR)")
+        add_btn = QPushButton("+ Add OR Clause")
         add_btn.clicked.connect(self._add_clause)
         layout.addWidget(add_btn)
 
         # Generated filter string (read-only reference)
         row = QHBoxLayout()
-        row.addWidget(QLabel("Filter string:"))
+        row.addWidget(QLabel("Filter:"))
         self._filter_display = QLineEdit()
         self._filter_display.setReadOnly(True)
         self._filter_display.setPlaceholderText("(add conditions above to build a filter)")
@@ -477,7 +464,7 @@ class FilterBuilderWidget(QWidget):
 
     def _renumber(self) -> None:
         for i, clause in enumerate(self._clauses):
-            clause.setTitle(f"Clause {i + 1}  (OR)")
+            clause.setTitle(f"OR Clause {i + 1}")
 
     def _refresh(self) -> None:
         parts      = [c.to_clause_str() for c in self._clauses]
