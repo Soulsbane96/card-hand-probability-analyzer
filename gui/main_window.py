@@ -3,8 +3,8 @@ from __future__ import annotations
 import sys
 from typing import Dict, List, Optional
 
-from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QAction, QActionGroup
+from PyQt6.QtCore import Qt, QThread, QTimer, pyqtSignal
+from PyQt6.QtGui import QAction, QActionGroup, QIcon
 from PyQt6.QtWidgets import (
     QApplication,
     QGroupBox,
@@ -19,8 +19,12 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from version import __version__
 from core.filters import FilterSpec
+from core.resources import resource_path
+from core.updater import check_for_update
 from gui.themes import THEMES
+from gui.update_dialog import UpdateDialog
 from gui.settings import load_theme, save_theme
 from gui.workers import AnalysisWorker
 from gui.filter_widgets import FilterBuilderWidget
@@ -30,15 +34,33 @@ from gui.results import ResultsPanel
 
 
 # ---------------------------------------------------------------------------
+# Background update checker
+# ---------------------------------------------------------------------------
+
+class _UpdateCheckThread(QThread):
+    update_found = pyqtSignal(str, str)  # new_version, download_url
+
+    def run(self) -> None:
+        try:
+            has_update, new_version, url = check_for_update(__version__)
+            if has_update and url:
+                self.update_found.emit(new_version, url)
+        except Exception:
+            pass
+
+
+# ---------------------------------------------------------------------------
 # Main window
 # ---------------------------------------------------------------------------
 
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Card Combination Analyzer")
+        self.setWindowTitle(f"Hand Probability Analyzer v{__version__}")
+        self.setWindowIcon(QIcon(resource_path("icon.ico")))
         self.setMinimumSize(1100, 600)
         self._worker: Optional[AnalysisWorker] = None
+        self._update_thread: Optional[_UpdateCheckThread] = None
         self._build_ui()
         self._build_menu_bar()
 
@@ -200,15 +222,41 @@ class MainWindow(QMainWindow):
         QMessageBox.critical(self, "Analysis Error", msg)
         self.statusBar().showMessage("Error — see dialog for details.")
 
+    # ------------------------------------------------------------------
+    # Auto-update
+    # ------------------------------------------------------------------
+
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        if getattr(sys, "frozen", False):
+            QTimer.singleShot(1500, self._start_update_check)
+
+    def _start_update_check(self) -> None:
+        self._update_thread = _UpdateCheckThread()
+        self._update_thread.update_found.connect(self._on_update_found)
+        self._update_thread.start()
+
+    def _on_update_found(self, new_version: str, url: str) -> None:
+        dlg = UpdateDialog(new_version, url, self)
+        dlg.exec()
+
 
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 
 def main() -> None:
+    # Required on Windows so the taskbar groups under this app, not a generic Python process.
+    if sys.platform == "win32":
+        import ctypes
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
+            f"Soulsbane96.HandProbabilityAnalyzer.{__version__}"
+        )
+
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
     app.setStyleSheet(THEMES[load_theme()])
+    app.setWindowIcon(QIcon(resource_path("icon.ico")))
     window = MainWindow()
     window.show()
     sys.exit(app.exec())
