@@ -1,3 +1,14 @@
 Normal Deck.csv
 .vscode/launch.json
-__pycache__
+
+# Python cache
+__pycache__/
+**/__pycache__/
+*.pyc
+
+# PyInstaller output
+build/
+dist/
+
+# Virtual environment
+venv/
