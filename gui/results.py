@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sqlite3
 from typing import Dict, List, Optional, Tuple
 
 from PyQt6.QtCore import Qt, QTimer
@@ -20,6 +21,7 @@ from PyQt6.QtWidgets import (
 )
 
 from core.filters import FilterSpec
+from core.db import MAX_SEARCHABLE
 from gui.table_model import (
     NumericItem,
     CombinationsTableModel,
@@ -43,6 +45,10 @@ class AllCombinationsWidget(QWidget):
         self._worker: Optional[SearchSortWorker] = None
         self._pending_search: str = ""
         self._pending_show_matches: bool = False
+        self._db_path: Optional[str]                = None
+        self._gui_db_conn: Optional[sqlite3.Connection] = None
+        self._db_attr_names: List[str]              = []
+        self._filtered_count: int                   = 0
         self._build_ui()
 
     def _build_ui(self) -> None:
@@ -94,15 +100,44 @@ class AllCombinationsWidget(QWidget):
         matched_indices: frozenset,
         hand_size: int,
         label_col: Optional[str],
+        db_path: Optional[str] = None,
+        db_attr_names: Optional[List[str]] = None,
+        filtered_count: int = 0,
     ) -> None:
         self._abort_worker()
-        self._model.update_data(combinations, matched_indices, hand_size, label_col)
+        # Close any previous GUI-thread connection before opening a new one
+        if self._gui_db_conn is not None:
+            self._gui_db_conn.close()
+            self._gui_db_conn = None
+        self._db_path        = db_path
+        self._db_attr_names  = db_attr_names or []
+        self._filtered_count = filtered_count
+        if db_path is not None:
+            from core.db import open_results_db
+            self._gui_db_conn = open_results_db(db_path)
+        self._model.update_data(
+            combinations, matched_indices, hand_size, label_col,
+            db_conn=self._gui_db_conn, db_attr_names=db_attr_names,
+        )
         self._search_edit.blockSignals(True)
         self._search_edit.clear()
         self._search_edit.blockSignals(False)
         self._matches_only_check.blockSignals(True)
         self._matches_only_check.setChecked(False)
-        self._matches_only_check.setEnabled(bool(matched_indices))
+        if db_path is not None:
+            too_large = filtered_count > MAX_SEARCHABLE
+            self._search_edit.setEnabled(not too_large)
+            self._matches_only_check.setEnabled(False)
+            if too_large:
+                self._search_edit.setToolTip(
+                    "Too many results to search; apply a more specific filter."
+                )
+            else:
+                self._search_edit.setToolTip("")
+        else:
+            self._search_edit.setEnabled(True)
+            self._matches_only_check.setEnabled(bool(matched_indices))
+            self._search_edit.setToolTip("")
         self._matches_only_check.blockSignals(False)
         self._pending_search = ""
         self._pending_show_matches = False
@@ -169,7 +204,9 @@ class AllCombinationsWidget(QWidget):
         sort_order: Qt.SortOrder,
     ) -> None:
         self._abort_worker()
-        if not self._model._combinations:
+        if self._db_path is None and not self._model._combinations:
+            return
+        if self._db_path is not None and self._filtered_count == 0:
             return
         self._worker = SearchSortWorker(
             self._model._combinations,
@@ -180,6 +217,8 @@ class AllCombinationsWidget(QWidget):
             sort_order,
             self._model._hand_size,
             self._model._label_col,
+            db_path=self._db_path,
+            filtered_count=self._filtered_count,
         )
         self._worker.finished.connect(self._on_worker_finished)
         self._worker.start()
@@ -192,7 +231,10 @@ class AllCombinationsWidget(QWidget):
 
     def _update_count_label(self) -> None:
         showing = len(self._model._display_indices)
-        total   = len(self._model._combinations)
+        if self._db_path is not None:
+            total = self._filtered_count
+        else:
+            total = len(self._model._combinations)
         self._count_label.setText(f"Showing {showing:,} of {total:,} combinations")
 
 
@@ -317,9 +359,9 @@ class ResultsPanel(QTabWidget):
         self._freq_table.setSortingEnabled(True)
 
     def _populate_hands(self, stats: dict) -> None:
-        filtered_hands = stats.get("filtered_hands", [])
-        label_col      = stats.get("label_col")
-        verbose        = stats.get("verbose", False)
+        verbose   = stats.get("verbose", False)
+        label_col = stats.get("label_col")
+        db_path   = stats.get("db_path")
 
         if not verbose:
             self._hands_text.setPlainText(
@@ -328,10 +370,21 @@ class ResultsPanel(QTabWidget):
             return
 
         MAX_DISPLAY = 1000
-        total       = len(filtered_hands)
         lines       = []
 
-        for i, hand in enumerate(filtered_hands[:MAX_DISPLAY], 1):
+        if db_path is not None:
+            from core.db import open_results_db, query_hand_page, count_filtered_hands
+            attr_names = stats.get("attr_names", [])
+            conn   = open_results_db(db_path)
+            total  = count_filtered_hands(conn)
+            hands  = query_hand_page(conn, 0, MAX_DISPLAY, attr_names)
+            conn.close()
+        else:
+            filtered_hands = stats.get("filtered_hands", [])
+            total          = len(filtered_hands)
+            hands          = filtered_hands[:MAX_DISPLAY]
+
+        for i, hand in enumerate(hands, 1):
             hand_str = "  |  ".join(c.label(label_col) for c in hand)
             lines.append(f"{i:>6}.  {hand_str}")
 
@@ -349,14 +402,26 @@ class ResultsPanel(QTabWidget):
         stats: dict,
         filter_spec: Optional[FilterSpec],
     ) -> None:
-        combinations   = stats.get("combinations", [])
-        filtered_hands = stats.get("filtered_hands", [])
-        hand_size      = stats.get("hand_size", 0)
-        label_col      = stats.get("label_col")
+        combinations    = stats.get("combinations", [])
+        filtered_hands  = stats.get("filtered_hands", [])
+        hand_size       = stats.get("hand_size", 0)
+        label_col       = stats.get("label_col")
+        db_path         = stats.get("db_path")
+        attr_names      = stats.get("attr_names", [])
+        filtered_count  = stats.get("filtered_count", 0)
 
-        if filter_spec is None:
-            matched_indices: frozenset = frozenset()
+        if db_path is not None:
+            self._all_combos_widget.populate(
+                [], frozenset(), hand_size, label_col,
+                db_path=db_path,
+                db_attr_names=attr_names,
+                filtered_count=filtered_count,
+            )
         else:
-            matched_indices = _build_matched_set(combinations, filtered_hands)
-
-        self._all_combos_widget.populate(combinations, matched_indices, hand_size, label_col)
+            if filter_spec is None:
+                matched_indices: frozenset = frozenset()
+            else:
+                matched_indices = _build_matched_set(combinations, filtered_hands)
+            self._all_combos_widget.populate(
+                combinations, matched_indices, hand_size, label_col
+            )

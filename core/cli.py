@@ -84,11 +84,23 @@ from __future__ import annotations
 import argparse
 import itertools
 import math
+import os
 
 from core.cards import build_standard_deck, get_sequence_order, load_deck_from_csv
 from core.filters import parse_filter
 from core.io import load_combinations_csv, save_combinations_csv
 from core.analysis import check_filter_warnings, compute_stats, print_report
+from core.parallel import parallel_compute_stats, PARALLEL_THRESHOLD
+from core.db import (
+    open_results_db,
+    init_results_db,
+    read_stats,
+    write_stats,
+    export_csv_from_db,
+    get_deck_hash,
+    find_cache_db,
+    make_cache_db_path,
+)
 
 
 def main():
@@ -174,15 +186,62 @@ def main():
         if hand_size > len(deck):
             parser.error(f"Hand size {hand_size} exceeds deck size {len(deck)}.")
 
-        total_count = math.comb(len(deck), hand_size)
-        print(f"\nGenerating C({len(deck)}, {hand_size}) = {total_count:,} combinations …")
-        combos = list(itertools.combinations(deck, hand_size))
+        # Parse filter early so it can be passed to the parallel path.
+        filter_spec = parse_filter(args.filter)
+        if filter_spec:
+            try:
+                filter_spec.validate_attrs(attr_names)
+            except ValueError as exc:
+                parser.error(str(exc))
 
-        if args.save_combos:
-            save_combinations_csv(args.save_combos, combos, attr_names)
+        warnings    = check_filter_warnings(filter_spec, hand_size) if filter_spec else []
+        total_count = math.comb(len(deck), hand_size)
+
+        deck_hash  = "standard" if not args.deck else get_deck_hash(deck, "csv")
+        cache_dir  = os.path.join(
+            os.environ.get("LOCALAPPDATA", os.path.expanduser("~")),
+            "CardHandAnalyzer", "cache",
+        )
+        filter_str = args.filter.strip()
+
+        if total_count >= PARALLEL_THRESHOLD:
+            print(
+                f"\nAnalysing C({len(deck)}, {hand_size}) = {total_count:,} combinations "
+                f"across {os.cpu_count()} cores …"
+            )
+            if args.save_combos:
+                print("  Note: combination saving is skipped; use --save-combos after analysis.")
+
+            hit = find_cache_db(cache_dir, deck_hash, hand_size, filter_str)
+            if hit:
+                print(f"  Cache hit — loading {hit!r}")
+                conn  = open_results_db(hit)
+                stats = read_stats(conn)
+            else:
+                db_path = make_cache_db_path(cache_dir, deck_hash, hand_size, filter_str)
+                conn    = open_results_db(db_path)
+                init_results_db(conn, attr_names, hand_size, deck_hash, filter_str)
+                stats = parallel_compute_stats(
+                    deck, hand_size, attr_names, filter_str, filter_spec,
+                    progress_cb=print,
+                    db_conn=conn,
+                )
+
+            if args.save_combos:
+                export_csv_from_db(conn, args.save_combos, attr_names)
+            conn.close()
+        else:
+            print(f"\nGenerating C({len(deck)}, {hand_size}) = {total_count:,} combinations …")
+            combos = list(itertools.combinations(deck, hand_size))
+            if args.save_combos:
+                save_combinations_csv(args.save_combos, combos, attr_names)
+            stats = compute_stats(combos, filter_spec, attr_names, hand_size, deck)
+
+        print_report(stats, filter_spec, hand_size, attr_names, args.label_col, args.verbose, warnings)
+        return
 
     # ------------------------------------------------------------------
-    # Parse & validate filter
+    # load_combos path: parse filter and analyse the pre-loaded list
     # ------------------------------------------------------------------
     filter_spec = parse_filter(args.filter)
     if filter_spec:
@@ -191,9 +250,6 @@ def main():
         except ValueError as exc:
             parser.error(str(exc))
 
-    # ------------------------------------------------------------------
-    # Analyse & report
-    # ------------------------------------------------------------------
     warnings = check_filter_warnings(filter_spec, hand_size) if filter_spec else []
     stats = compute_stats(combos, filter_spec, attr_names, hand_size)
     print_report(stats, filter_spec, hand_size, attr_names, args.label_col, args.verbose, warnings)

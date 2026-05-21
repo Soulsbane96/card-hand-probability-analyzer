@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import csv
-from typing import List, Tuple
+import sqlite3
+from typing import Callable, List, Optional, Tuple
 
 from core.cards import Card, register_sequence_order
+from core.filters import FilterSpec
 
 
 # ---------------------------------------------------------------------------
@@ -86,3 +88,75 @@ def load_combinations_csv(path: str) -> Tuple[List[Tuple[Card, ...]], List[str],
         register_sequence_order(attr, seen)
 
     return combinations, attr_names, hand_size
+
+
+def stream_combinations_csv_to_db(
+    csv_path: str,
+    conn: sqlite3.Connection,
+    filter_spec: Optional[FilterSpec],
+    attr_names: List[str],
+    hand_size: int,
+    progress_cb: Optional[Callable[[str], None]] = None,
+) -> Tuple[int, int]:
+    """
+    Read csv_path row-by-row, apply filter_spec, write matching hands to DB in
+    batches. Returns (total_count, filtered_count). Never holds more than one
+    batch in RAM.
+    """
+    from core.db import insert_filtered_hands_batch, INSERT_BATCH_SIZE
+
+    total_count    = 0
+    filtered_count = 0
+    batch: List[Tuple[Card, ...]] = []
+
+    # Re-infer sequence order from the first pass values seen
+    seq_seen: dict = {a: {"seen": [], "seen_set": set()} for a in attr_names}
+
+    with open(csv_path, newline="", encoding="utf-8-sig") as fh:
+        reader = csv.DictReader(fh)
+        if reader.fieldnames is None:
+            raise ValueError(f"Combinations CSV {csv_path!r} has no header row.")
+        headers   = [h.strip() for h in reader.fieldnames]
+        card1_attrs = [h[len("card1_"):] for h in headers if h.lower().startswith("card1_")]
+        if not card1_attrs:
+            raise ValueError(
+                "Cannot parse combinations CSV — expected columns like 'card1_rank', 'card1_suit' …"
+            )
+        file_attrs = card1_attrs
+        file_hand_size = sum(1 for h in headers if h.lower().endswith(f"_{file_attrs[0].lower()}"))
+
+        for row in reader:
+            hand = tuple(
+                Card({a: row[f"card{i+1}_{a}"] for a in file_attrs})
+                for i in range(file_hand_size)
+            )
+            total_count += 1
+
+            # Track sequence order from values seen
+            for a in file_attrs:
+                sd = seq_seen[a] if a in seq_seen else None
+                if sd is not None:
+                    for card in hand:
+                        v = card.attr(a)
+                        if v not in sd["seen_set"]:
+                            sd["seen"].append(v)
+                            sd["seen_set"].add(v)
+
+            if filter_spec is None or filter_spec.matches(hand):
+                filtered_count += 1
+                batch.append(hand)
+                if len(batch) >= INSERT_BATCH_SIZE:
+                    insert_filtered_hands_batch(conn, batch, attr_names)
+                    batch.clear()
+                    if progress_cb:
+                        progress_cb(f"  Streamed {filtered_count:,} matching rows …")
+
+    if batch:
+        insert_filtered_hands_batch(conn, batch, attr_names)
+
+    # Register sequence orders so straight detection works identically
+    for a in file_attrs:
+        if a in seq_seen:
+            register_sequence_order(a, seq_seen[a]["seen"])
+
+    return total_count, filtered_count

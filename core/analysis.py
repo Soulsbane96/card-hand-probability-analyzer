@@ -16,22 +16,18 @@ from core.filters import FilterSpec
 #
 # _unique_values_in_deck() is a helper used internally to decide which checks
 # are worth including — it counts how many distinct values an attribute has
-# across all combinations so that trivially-forced or impossible checks are
-# suppressed (see the docstring on build_aggregate_checks for the full rules).
+# across the deck so that trivially-forced or impossible checks are suppressed
+# (see the docstring on build_aggregate_checks for the full rules).
 
-def _unique_values_in_deck(attr: str, combinations: List[Tuple[Card, ...]]) -> int:
-    """Count how many distinct values appear for this attr across all hands."""
-    seen: set = set()
-    for hand in combinations:
-        for card in hand:
-            seen.add(card.attr(attr))
-    return len(seen)
+def _unique_values_in_deck(attr: str, deck: List[Card]) -> int:
+    """Count how many distinct values appear for this attr across the deck."""
+    return len({card.attr(attr) for card in deck})
 
 
 def build_aggregate_checks(
     attr_names: List[str],
     hand_size: int,
-    combinations: List[Tuple[Card, ...]],
+    deck: List[Card],
     filter_spec: Optional[FilterSpec] = None,
 ) -> List[Tuple[str, any, bool]]:
     """
@@ -87,7 +83,7 @@ def build_aggregate_checks(
     # ------------------------------------------------------------------
     for attr in attr_names:
         a        = attr
-        n_unique = _unique_values_in_deck(attr, combinations)
+        n_unique = _unique_values_in_deck(attr, deck)
         order    = get_sequence_order(a)
         ord_size = len(order) if order else n_unique
 
@@ -209,6 +205,7 @@ def compute_stats(
     filter_spec: Optional[FilterSpec],
     attr_names: List[str],
     hand_size: int,
+    deck: Optional[List[Card]] = None,
 ) -> dict:
     total    = len(combinations)
     # Collect hands that satisfy the filter, or all hands if no filter is active.
@@ -217,8 +214,11 @@ def compute_stats(
         if filter_spec else list(combinations)
     )
 
+    if deck is None:
+        deck = list({card for hand in combinations for card in hand})
+
     # Build the aggregate check list (suppresses trivial/impossible checks).
-    agg_checks = build_aggregate_checks(attr_names, hand_size, combinations, filter_spec)
+    agg_checks = build_aggregate_checks(attr_names, hand_size, deck, filter_spec)
 
     # All aggregate counts run against ALL combinations so % are always "% of total".
     # Iterating once and dispatching to each check fn is O(n_combinations * n_checks).
