@@ -225,19 +225,18 @@ class MainWindow(QMainWindow):
         if warnings:
             QMessageBox.warning(self, "Filter Warnings", "\n".join(warnings))
 
-        # Override auto-generated filter-row labels with user-supplied clause names.
+        # Build a map of original filter-row labels → user-supplied clause names.
         clause_names = self._filter_builder.get_clause_names()
-        if clause_names and filter_spec:
-            agg_checks = stats.get("agg_checks", [])
-            name_iter  = iter(clause_names)
-            patched    = []
-            for label, fn, is_filter in agg_checks:
+        if any(clause_names) and filter_spec:
+            name_iter       = iter(clause_names)
+            filter_row_names: dict = {}
+            for label, _, is_filter in stats.get("agg_checks", []):
                 if is_filter:
                     custom = next(name_iter, "")
-                    patched.append((custom or label, fn, is_filter))
-                else:
-                    patched.append((label, fn, is_filter))
-            stats["agg_checks"] = patched
+                    if custom:
+                        filter_row_names[label] = custom
+            if filter_row_names:
+                stats["filter_row_names"] = filter_row_names
 
         self._results.populate(stats, filter_spec)
         self._results.setCurrentIndex(0)

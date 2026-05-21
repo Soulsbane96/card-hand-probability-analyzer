@@ -296,9 +296,10 @@ class ResultsPanel(QTabWidget):
         stats:       dict,
         filter_spec: Optional[FilterSpec],
     ) -> None:
-        agg_checks = stats["agg_checks"]
-        agg_counts = stats["agg_counts"]
-        total      = stats["total_combinations"]
+        agg_checks       = stats["agg_checks"]
+        agg_counts       = stats["agg_counts"]
+        total            = stats["total_combinations"]
+        filter_row_names = stats.get("filter_row_names", {})
 
         self._stats_table.setSortingEnabled(False)
         self._stats_table.setRowCount(len(agg_checks))
@@ -308,7 +309,9 @@ class ResultsPanel(QTabWidget):
             pct   = count / total if total else 0.0
             pct_s = f"{100 * pct:.4f}%"
 
-            display_label = ("▶  " if is_filter else "    ") + label
+            custom_name   = filter_row_names.get(label) if is_filter else None
+            prefix        = "▶  " if is_filter else "    "
+            display_label = prefix + (custom_name or label)
             label_item    = QTableWidgetItem(display_label)
             count_item    = NumericItem(count, f"{count:,}")
             pct_item      = NumericItem(pct,   pct_s)
@@ -322,6 +325,17 @@ class ResultsPanel(QTabWidget):
                 )
                 item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
                 self._stats_table.setItem(row, col, item)
+
+            if custom_name:
+                hl  = _highlight_color()
+                lbl = QLabel()
+                lbl.setContentsMargins(4, 0, 4, 0)
+                lbl.setStyleSheet(f"background-color: {hl.name()};")
+                lbl.setText(
+                    f'{prefix}<b>{custom_name}</b>'
+                    f'&nbsp;<span style="color: #888; font-style: italic;">({label})</span>'
+                )
+                self._stats_table.setCellWidget(row, 0, lbl)
 
         self._stats_table.setSortingEnabled(True)
 
