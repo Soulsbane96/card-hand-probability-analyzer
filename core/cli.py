@@ -201,10 +201,8 @@ def main():
         total_count = math.comb(len(deck), hand_size)
 
         deck_hash  = "standard" if not args.deck else get_deck_hash(deck, "csv")
-        cache_dir  = os.path.join(
-            os.environ.get("LOCALAPPDATA", os.path.expanduser("~")),
-            "CardHandAnalyzer", "cache",
-        )
+        from core.resources import app_dir
+        cache_dir  = os.path.join(app_dir(), "deck_cache")
         filter_str = args.filter.strip()
 
         if total_count >= PARALLEL_THRESHOLD:

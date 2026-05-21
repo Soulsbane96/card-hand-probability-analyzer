@@ -38,8 +38,8 @@ from core.io import stream_combinations_csv_to_db
 
 
 def _default_cache_dir() -> str:
-    local_app_data = os.environ.get("LOCALAPPDATA", os.path.expanduser("~"))
-    return os.path.join(local_app_data, "CardHandAnalyzer", "cache")
+    from core.resources import app_dir
+    return os.path.join(app_dir(), "deck_cache")
 
 
 # ---------------------------------------------------------------------------

@@ -12,3 +12,6 @@ dist/
 
 # Virtual environment
 venv/
+
+# Deck cache (local by default; use git add -f deck_cache/<file> to bundle specific ones)
+deck_cache/
