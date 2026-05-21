@@ -88,6 +88,7 @@ class MainWindow(QMainWindow):
     def _set_theme(self, name: str) -> None:
         save_theme(name)
         QApplication.instance().setStyleSheet(THEMES[name])
+        self._results.refresh_highlight_colors()
         self._sync_theme_check()
 
     def _build_ui(self) -> None:

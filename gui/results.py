@@ -246,6 +246,8 @@ class ResultsPanel(QTabWidget):
         self._build_tabs()
 
     def _build_tabs(self) -> None:
+        self._highlighted_rows: list[int] = []
+
         # ---- Statistics ----
         self._stats_table = QTableWidget(0, 3)
         self._stats_table.setHorizontalHeaderLabels(["Label", "Count", "%"])
@@ -291,6 +293,19 @@ class ResultsPanel(QTabWidget):
         self._populate_hands(stats)
         self._populate_all_combos(stats, filter_spec)
 
+    def refresh_highlight_colors(self) -> None:
+        new_color = _highlight_color()
+        brush = QBrush(new_color)
+        for row in self._highlighted_rows:
+            for col in range(self._stats_table.columnCount()):
+                item = self._stats_table.item(row, col)
+                if item:
+                    item.setBackground(brush)
+            widget = self._stats_table.cellWidget(row, 0)
+            if widget:
+                widget.setStyleSheet(f"background-color: {new_color.name()};")
+        self._all_combos_widget._view.viewport().update()
+
     def _populate_stats(
         self,
         stats:       dict,
@@ -301,6 +316,7 @@ class ResultsPanel(QTabWidget):
         total            = stats["total_combinations"]
         filter_row_names = stats.get("filter_row_names", {})
 
+        self._highlighted_rows = []
         self._stats_table.setSortingEnabled(False)
         self._stats_table.setRowCount(len(agg_checks))
 
@@ -315,6 +331,9 @@ class ResultsPanel(QTabWidget):
             label_item    = QTableWidgetItem(display_label)
             count_item    = NumericItem(count, f"{count:,}")
             pct_item      = NumericItem(pct,   pct_s)
+
+            if is_filter:
+                self._highlighted_rows.append(row)
 
             for col, item in enumerate([label_item, count_item, pct_item]):
                 if is_filter:
