@@ -84,11 +84,26 @@ from __future__ import annotations
 import argparse
 import itertools
 import math
+import os
 
 from core.cards import build_standard_deck, get_sequence_order, load_deck_from_csv
 from core.filters import parse_filter
 from core.io import load_combinations_csv, save_combinations_csv
 from core.analysis import check_filter_warnings, compute_stats, print_report
+from core.parallel import parallel_compute_stats, parallel_stream_db_to_db, PARALLEL_THRESHOLD
+from core.db import (
+    open_results_db,
+    init_results_db,
+    read_stats,
+    write_stats,
+    export_csv_from_db,
+    get_deck_hash,
+    find_cache_db,
+    make_cache_db_path,
+    find_tier1_db,
+    make_tier1_db_path,
+    TIER1_SIZE_LIMIT,
+)
 
 
 def main():
@@ -174,15 +189,166 @@ def main():
         if hand_size > len(deck):
             parser.error(f"Hand size {hand_size} exceeds deck size {len(deck)}.")
 
-        total_count = math.comb(len(deck), hand_size)
-        print(f"\nGenerating C({len(deck)}, {hand_size}) = {total_count:,} combinations …")
-        combos = list(itertools.combinations(deck, hand_size))
+        # Parse filter early so it can be passed to the parallel path.
+        filter_spec = parse_filter(args.filter)
+        if filter_spec:
+            try:
+                filter_spec.validate_attrs(attr_names)
+            except ValueError as exc:
+                parser.error(str(exc))
 
-        if args.save_combos:
-            save_combinations_csv(args.save_combos, combos, attr_names)
+        warnings    = check_filter_warnings(filter_spec, hand_size) if filter_spec else []
+        total_count = math.comb(len(deck), hand_size)
+
+        deck_hash  = "standard" if not args.deck else get_deck_hash(deck, "csv")
+        from core.resources import app_dir
+        cache_dir  = os.path.join(app_dir(), "deck_cache")
+        filter_str = args.filter.strip()
+
+        if total_count >= PARALLEL_THRESHOLD:
+            # tier-2 cache hit (same deck + filter)
+            hit = find_cache_db(cache_dir, deck_hash, hand_size, filter_str)
+            conn = None
+            if hit:
+                print(f"\n  Cache hit (tier-2) — loading {hit!r}")
+                conn  = open_results_db(hit)
+                stats = read_stats(conn)
+                if args.save_combos:
+                    tier1_path = find_tier1_db(cache_dir, deck_hash, hand_size)
+                    export_src = tier1_path or hit
+                    ec = open_results_db(export_src)
+                    export_csv_from_db(ec, args.save_combos, attr_names)
+                    ec.close()
+                conn.close()
+                conn = None
+
+            else:
+                tier1_path = find_tier1_db(cache_dir, deck_hash, hand_size)
+
+                if tier1_path and filter_spec:
+                    # fast re-filter from tier-1
+                    print(
+                        f"\nRe-filtering tier-1 ({total_count:,} combinations) …"
+                    )
+                    from core.analysis import build_aggregate_checks
+                    agg_checks = build_aggregate_checks(
+                        attr_names, hand_size, deck, filter_spec
+                    )
+                    t1_conn = open_results_db(tier1_path)
+                    db_path = make_cache_db_path(
+                        cache_dir, deck_hash, hand_size, filter_str
+                    )
+                    t2_conn = open_results_db(db_path)
+                    init_results_db(t2_conn, attr_names, hand_size, deck_hash, filter_str)
+                    total_c_out, filtered_count = parallel_stream_db_to_db(
+                        tier1_path, t2_conn, filter_spec, filter_str,
+                        attr_names, agg_checks, deck, hand_size,
+                        progress_cb=print,
+                    )
+                    print(f"  {filtered_count:,} matching / {total_c_out:,} total")
+                    if args.save_combos:
+                        export_csv_from_db(t1_conn, args.save_combos, attr_names)
+                    t1_conn.close()
+                    stats = read_stats(t2_conn)
+                    conn  = t2_conn
+
+                elif tier1_path and not filter_spec:
+                    print(f"\n  Cache hit (tier-1) — loading {tier1_path!r}")
+                    conn  = open_results_db(tier1_path)
+                    stats = read_stats(conn)
+                    if args.save_combos:
+                        export_csv_from_db(conn, args.save_combos, attr_names)
+                    conn.close()
+                    conn = None
+
+                elif total_count <= TIER1_SIZE_LIMIT:
+                    # build tier-1 from scratch
+                    print(
+                        f"\nBuilding tier-1: C({len(deck)}, {hand_size}) = {total_count:,} "
+                        f"combinations across {os.cpu_count()} cores …"
+                    )
+                    t1_db_path = make_tier1_db_path(cache_dir, deck_hash, hand_size)
+                    t1_conn    = open_results_db(t1_db_path)
+                    init_results_db(
+                        t1_conn, attr_names, hand_size, deck_hash,
+                        filter_str="", deck=deck,
+                    )
+                    parallel_compute_stats(
+                        deck, hand_size, attr_names,
+                        filter_str="", filter_spec=None,
+                        progress_cb=print,
+                        db_conn=t1_conn,
+                        no_cap=True,
+                        tier1_deck=deck,
+                    )
+                    print(f"  Tier-1 complete: {total_count:,} combinations stored.")
+
+                    if filter_spec:
+                        print("Deriving tier-2 (applying filter) …")
+                        from core.analysis import build_aggregate_checks
+                        agg_checks = build_aggregate_checks(
+                            attr_names, hand_size, deck, filter_spec
+                        )
+                        db_path = make_cache_db_path(
+                            cache_dir, deck_hash, hand_size, filter_str
+                        )
+                        t2_conn = open_results_db(db_path)
+                        init_results_db(t2_conn, attr_names, hand_size, deck_hash, filter_str)
+                        total_c_out, filtered_count = parallel_stream_db_to_db(
+                            t1_db_path, t2_conn, filter_spec, filter_str,
+                            attr_names, agg_checks, deck, hand_size,
+                            progress_cb=print,
+                        )
+                        print(f"  {filtered_count:,} matching / {total_c_out:,} total")
+                        if args.save_combos:
+                            export_csv_from_db(t1_conn, args.save_combos, attr_names)
+                        t1_conn.close()
+                        stats = read_stats(t2_conn)
+                        conn  = t2_conn
+                    else:
+                        if args.save_combos:
+                            export_csv_from_db(t1_conn, args.save_combos, attr_names)
+                        stats = read_stats(t1_conn)
+                        conn  = t1_conn
+
+                else:
+                    # too large for tier-1; build tier-2 directly
+                    print(
+                        f"\nAnalysing C({len(deck)}, {hand_size}) = {total_count:,} "
+                        f"combinations across {os.cpu_count()} cores … "
+                        f"(deck too large for tier-1 cache)"
+                    )
+                    db_path = make_cache_db_path(
+                        cache_dir, deck_hash, hand_size, filter_str
+                    )
+                    conn    = open_results_db(db_path)
+                    init_results_db(conn, attr_names, hand_size, deck_hash, filter_str)
+                    stats = parallel_compute_stats(
+                        deck, hand_size, attr_names, filter_str, filter_spec,
+                        progress_cb=print,
+                        db_conn=conn,
+                    )
+                    if args.save_combos:
+                        export_csv_from_db(conn, args.save_combos, attr_names)
+                        print(
+                            "  Note: exported filtered hands only (deck too large for "
+                            "full-combination tier-1 cache)."
+                        )
+
+            if conn is not None:
+                conn.close()
+        else:
+            print(f"\nGenerating C({len(deck)}, {hand_size}) = {total_count:,} combinations …")
+            combos = list(itertools.combinations(deck, hand_size))
+            if args.save_combos:
+                save_combinations_csv(args.save_combos, combos, attr_names)
+            stats = compute_stats(combos, filter_spec, attr_names, hand_size, deck)
+
+        print_report(stats, filter_spec, hand_size, attr_names, args.label_col, args.verbose, warnings)
+        return
 
     # ------------------------------------------------------------------
-    # Parse & validate filter
+    # load_combos path: parse filter and analyse the pre-loaded list
     # ------------------------------------------------------------------
     filter_spec = parse_filter(args.filter)
     if filter_spec:
@@ -191,9 +357,6 @@ def main():
         except ValueError as exc:
             parser.error(str(exc))
 
-    # ------------------------------------------------------------------
-    # Analyse & report
-    # ------------------------------------------------------------------
     warnings = check_filter_warnings(filter_spec, hand_size) if filter_spec else []
     stats = compute_stats(combos, filter_spec, attr_names, hand_size)
     print_report(stats, filter_spec, hand_size, attr_names, args.label_col, args.verbose, warnings)
