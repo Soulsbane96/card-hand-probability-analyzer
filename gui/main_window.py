@@ -4,7 +4,7 @@ import sys
 from typing import Dict, List, Optional
 
 from PyQt6.QtCore import Qt, QThread, QTimer, pyqtSignal
-from PyQt6.QtGui import QAction, QActionGroup, QIcon
+from PyQt6.QtGui import QAction, QActionGroup, QFont, QIcon, QTextCursor
 from PyQt6.QtWidgets import (
     QApplication,
     QGroupBox,
@@ -12,6 +12,7 @@ from PyQt6.QtWidgets import (
     QLabel,
     QMainWindow,
     QMessageBox,
+    QPlainTextEdit,
     QProgressBar,
     QPushButton,
     QSplitter,
@@ -131,6 +132,24 @@ class MainWindow(QMainWindow):
         run_row.addWidget(self._progress_label)
         config_layout.addLayout(run_row)
 
+        # Log console — collapsed by default, expands to show all progress messages
+        self._log_toggle = QPushButton("▶ Log")
+        self._log_toggle.setCheckable(True)
+        self._log_toggle.setFlat(True)
+        self._log_toggle.setFixedHeight(20)
+        self._log_toggle.toggled.connect(self._on_log_toggle)
+
+        self._log_text = QPlainTextEdit()
+        self._log_text.setReadOnly(True)
+        self._log_text.setFont(QFont("Courier New", 8))
+        self._log_text.setMaximumBlockCount(500)
+        self._log_text.setFixedHeight(120)
+        self._log_text.setVisible(False)
+        self._log_msg_count = 0
+
+        config_layout.addWidget(self._log_toggle)
+        config_layout.addWidget(self._log_text)
+
         splitter.addWidget(config_widget)
 
         # ---- Results panel (bottom half) ----
@@ -179,6 +198,9 @@ class MainWindow(QMainWindow):
         self._run_btn.setEnabled(False)
         self._progress_bar.setVisible(True)
         self._progress_label.setText("Starting …")
+        self._log_text.clear()
+        self._log_msg_count = 0
+        self._log_toggle.setText("▶ Log")
 
         self._worker = AnalysisWorker(params)
         self._worker.progress.connect(self._on_progress)
@@ -189,6 +211,10 @@ class MainWindow(QMainWindow):
     def _on_progress(self, msg: str) -> None:
         self._progress_label.setText(msg)
         self.statusBar().showMessage(msg)
+        self._log_text.appendPlainText(msg)
+        self._log_msg_count += 1
+        if not self._log_toggle.isChecked():
+            self._log_toggle.setText(f"▶ Log ({self._log_msg_count})")
 
     def _on_finished(self, stats: dict, filter_spec: Optional[FilterSpec]) -> None:
         self._progress_bar.setVisible(False)
@@ -198,6 +224,20 @@ class MainWindow(QMainWindow):
         warnings = stats.get("warnings", [])
         if warnings:
             QMessageBox.warning(self, "Filter Warnings", "\n".join(warnings))
+
+        # Override auto-generated filter-row labels with user-supplied clause names.
+        clause_names = self._filter_builder.get_clause_names()
+        if clause_names and filter_spec:
+            agg_checks = stats.get("agg_checks", [])
+            name_iter  = iter(clause_names)
+            patched    = []
+            for label, fn, is_filter in agg_checks:
+                if is_filter:
+                    custom = next(name_iter, "")
+                    patched.append((custom or label, fn, is_filter))
+                else:
+                    patched.append((label, fn, is_filter))
+            stats["agg_checks"] = patched
 
         self._results.populate(stats, filter_spec)
         self._results.setCurrentIndex(0)
@@ -209,18 +249,30 @@ class MainWindow(QMainWindow):
         filtered = stats["filtered_count"]
         if filter_spec:
             pct = f"{100 * filtered / total:.4f}%" if total else "0.0000%"
+            summary = f"Done — {filtered:,} matching / {total:,} total ({pct})"
             self.statusBar().showMessage(
                 f"Done  —  {filtered:,} matching hands / {total:,} total ({pct})"
             )
         else:
+            summary = f"Done — {total:,} total combinations"
             self.statusBar().showMessage(f"Done  —  {total:,} total combinations")
+        self._log_text.appendPlainText(summary)
 
     def _on_error(self, msg: str) -> None:
         self._progress_bar.setVisible(False)
         self._progress_label.setText("")
         self._run_btn.setEnabled(True)
+        self._log_text.appendPlainText(f"Error: {msg}")
         QMessageBox.critical(self, "Analysis Error", msg)
         self.statusBar().showMessage("Error — see dialog for details.")
+
+    def _on_log_toggle(self, checked: bool) -> None:
+        self._log_text.setVisible(checked)
+        if checked:
+            self._log_toggle.setText("▼ Log")
+            self._log_text.moveCursor(QTextCursor.MoveOperation.End)
+        else:
+            self._log_toggle.setText(f"▶ Log ({self._log_msg_count})")
 
     # ------------------------------------------------------------------
     # Auto-update

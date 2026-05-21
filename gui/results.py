@@ -180,7 +180,7 @@ class AllCombinationsWidget(QWidget):
             order,
         )
 
-    def _on_worker_finished(self, indices: list) -> None:
+    def _on_worker_finished(self, indices) -> None:
         self._model.apply_results(indices)
         self._update_count_label()
 
@@ -230,11 +230,8 @@ class AllCombinationsWidget(QWidget):
         self._worker = None
 
     def _update_count_label(self) -> None:
-        showing = len(self._model._display_indices)
-        if self._db_path is not None:
-            total = self._filtered_count
-        else:
-            total = len(self._model._combinations)
+        showing = self._model.rowCount()
+        total   = self._filtered_count if self._db_path is not None else len(self._model._combinations)
         self._count_label.setText(f"Showing {showing:,} of {total:,} combinations")
 
 

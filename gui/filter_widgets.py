@@ -342,9 +342,12 @@ class FilterClauseWidget(QGroupBox):
         self._outer.setContentsMargins(6, 4, 6, 6)
         self._outer.setSpacing(4)
 
-        # Header: remove button right-aligned
+        # Header: name field + remove button
         hdr = QHBoxLayout()
-        hdr.addStretch()
+        self._name_edit = QLineEdit()
+        self._name_edit.setPlaceholderText("Name (optional)")
+        self._name_edit.textChanged.connect(self.changed)
+        hdr.addWidget(self._name_edit, 1)
         remove_btn = QPushButton("Remove")
         remove_btn.setProperty("danger", True)
         remove_btn.clicked.connect(lambda: self.remove_requested.emit(self))
@@ -389,6 +392,9 @@ class FilterClauseWidget(QGroupBox):
         self.attr_values = attr_values
         for token in self._tokens:
             token.update_attrs(attr_names, attr_values)
+
+    def get_name(self) -> str:
+        return self._name_edit.text().strip()
 
     def to_clause_str(self) -> str:
         parts = [t.to_token_str() for t in self._tokens]
@@ -486,6 +492,9 @@ class FilterBuilderWidget(QWidget):
 
     def get_filter_str(self) -> str:
         return self._filter_display.text()
+
+    def get_clause_names(self) -> List[str]:
+        return [c.get_name() for c in self._clauses]
 
     def clear_clauses(self) -> None:
         for clause in list(self._clauses):

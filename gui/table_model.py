@@ -64,7 +64,7 @@ class CombinationsTableModel(QAbstractTableModel):
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
         self._combinations: List[Tuple]  = []
-        self._display_indices: List[int] = []
+        self._display_indices: Optional[List[int]] = []
         self._matched_indices: frozenset = frozenset()
         self._hand_size: int             = 0
         self._label_col: Optional[str]   = None
@@ -83,8 +83,8 @@ class CombinationsTableModel(QAbstractTableModel):
     # ------------------------------------------------------------------
 
     def rowCount(self, parent: QModelIndex = QModelIndex()) -> int:
-        if self._db_conn is not None:
-            return len(self._display_indices)
+        if self._display_indices is None:
+            return self._db_row_count if self._db_conn is not None else len(self._combinations)
         return len(self._display_indices)
 
     def columnCount(self, parent: QModelIndex = QModelIndex()) -> int:
@@ -94,10 +94,10 @@ class CombinationsTableModel(QAbstractTableModel):
         if not index.isValid():
             return None
         row, col = index.row(), index.column()
-        if row >= len(self._display_indices) or col >= self._hand_size:
+        if row >= self.rowCount() or col >= self._hand_size:
             return None
 
-        orig_idx = self._display_indices[row]
+        orig_idx = self._display_indices[row] if self._display_indices is not None else row
 
         if self._db_conn is not None:
             if role == Qt.ItemDataRole.DisplayRole:
@@ -155,7 +155,7 @@ class CombinationsTableModel(QAbstractTableModel):
             self._db_row_count    = count_filtered_hands(db_conn)
             self._combinations    = []
             self._matched_indices = frozenset()
-            self._display_indices = list(range(self._db_row_count))
+            self._display_indices = None   # None = all rows sequential; never materialize
         else:
             self._combinations    = combinations
             self._matched_indices = matched_indices
