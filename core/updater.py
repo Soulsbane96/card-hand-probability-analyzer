@@ -2,7 +2,6 @@ from __future__ import annotations
 import json
 import os
 import subprocess
-import sys
 import urllib.request
 from typing import Callable, Optional, Tuple
 
@@ -59,19 +58,69 @@ def download_update(
 
 
 def apply_update(old_exe_path: str, new_exe_path: str) -> None:
-    """Write a .bat that swaps the exes after a 2-second delay, then exits."""
-    bat_path = os.path.join(os.environ.get("TEMP", "."), "card_hand_update.bat")
+    """Write a .bat that polls until the old exe is releasable, swaps it,
+    and relaunches the new one. Logs every step to %TEMP%\\card_hand_update.log.
+
+    Does NOT call sys.exit — the caller must shut down Qt cleanly so that
+    PyInstaller can tear down its temp folder in the correct order.
+    """
+    old_exe_dir = os.path.dirname(old_exe_path)
+    temp_dir = os.environ.get("TEMP", ".")
+    bat_path = os.path.join(temp_dir, "card_hand_update.bat")
+    log_path = os.path.join(temp_dir, "card_hand_update.log")
+
+    # Poll up to 30s for the old exe to become deletable, then swap.
+    # PowerShell Start-Process gives a cleanly detached child — `start` from a
+    # detached cmd can leave the new process racing with the dying parent's
+    # PyInstaller cleanup, which is what was producing the python313.dll error.
     bat = (
         "@echo off\n"
-        "timeout /t 2 /nobreak >nul\n"
-        f'del /f /q "{old_exe_path}"\n'
-        f'move /y "{new_exe_path}" "{old_exe_path}"\n'
-        f'start "" "{old_exe_path}"\n'
+        "setlocal\n"
+        f'set "LOG={log_path}"\n'
+        f'set "OLD={old_exe_path}"\n'
+        f'set "NEW={new_exe_path}"\n'
+        f'set "DIR={old_exe_dir}"\n'
+        '>"%LOG%" echo [%date% %time%] update bat started\n'
+        "set /a TRIES=0\n"
+        ":wait_loop\n"
+        'del /f /q "%OLD%" 2>nul\n'
+        'if not exist "%OLD%" goto deleted\n'
+        "set /a TRIES+=1\n"
+        'if %TRIES% GEQ 30 (\n'
+        '  >>"%LOG%" echo [%date% %time%] FAIL: old exe still locked after 30s\n'
+        '  exit /b 1\n'
+        ')\n'
+        '>>"%LOG%" echo [%date% %time%] old exe still locked, retry %TRIES%\n'
+        "timeout /t 1 /nobreak >nul\n"
+        "goto wait_loop\n"
+        ":deleted\n"
+        '>>"%LOG%" echo [%date% %time%] old exe deleted, moving new in\n'
+        'move /y "%NEW%" "%OLD%" >>"%LOG%" 2>&1\n'
+        'if errorlevel 1 (\n'
+        '  >>"%LOG%" echo [%date% %time%] FAIL: move failed\n'
+        '  exit /b 1\n'
+        ')\n'
+        '>>"%LOG%" echo [%date% %time%] launching new exe via powershell\n'
+        'set "_MEIPASS2="\n'
+        'set "_PYI_APPLICATION_HOME_DIR="\n'
+        'set "_PYI_PARENT_PROCESS_LEVEL="\n'
+        'powershell -NoProfile -WindowStyle Hidden -Command '
+        '"Start-Process -FilePath \'%OLD%\' -WorkingDirectory \'%DIR%\'" '
+        '>>"%LOG%" 2>&1\n'
+        '>>"%LOG%" echo [%date% %time%] done\n'
     )
     with open(bat_path, "w") as f:
         f.write(bat)
+
+    # Strip every PyInstaller env var that signals "you are a re-exec of an
+    # onefile parent — reuse that parent's _MEI dir." Names changed across
+    # PyInstaller versions, so clear all of them.
+    env = os.environ.copy()
+    for var in ("_MEIPASS2", "_PYI_APPLICATION_HOME_DIR", "_PYI_PARENT_PROCESS_LEVEL"):
+        env.pop(var, None)
+
     subprocess.Popen(
         ["cmd", "/c", bat_path],
         creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP,
+        env=env,
     )
-    sys.exit(0)
