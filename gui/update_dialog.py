@@ -1,7 +1,6 @@
 from __future__ import annotations
 import os
 import sys
-import tempfile
 
 from PyQt6.QtCore import QThread, pyqtSignal
 from PyQt6.QtWidgets import (
@@ -40,7 +39,10 @@ class UpdateDialog(QDialog):
         self.setWindowTitle("Update Available")
         self.setFixedWidth(420)
         self._url  = download_url
-        self._dest = os.path.join(tempfile.gettempdir(), "CardHandAnalyzer_new.exe")
+        # Download next to the running exe so the bat-file move is a same-drive
+        # rename (atomic) rather than a cross-drive copy that AV can block.
+        exe_dir = os.path.dirname(sys.executable)
+        self._dest = os.path.join(exe_dir, "_HandProbabilityAnalyzer_update.exe")
 
         layout = QVBoxLayout(self)
 
@@ -80,6 +82,8 @@ class UpdateDialog(QDialog):
     def _on_downloaded(self, path: str) -> None:
         self._label.setText("Restarting…")
         apply_update(sys.executable, path)
+        from PyQt6.QtWidgets import QApplication
+        QApplication.instance().quit()
 
     def _on_error(self, msg: str) -> None:
         self._label.setText(f"Download failed: {msg}")
