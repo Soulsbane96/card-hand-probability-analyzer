@@ -19,5 +19,6 @@ Will cache all deck and hand size combinations for larger combo counts (up to 75
 4. Build your filter criteria (these will be highlighted when the results are generated).
 5. Run Analysis. This will generate a combination for each possible distinct hand of the given hand size. 
     - Duplicated cards in a csv will show up as different cards in these combinations. If you do not want this you'll need to pare down to one row per card.
+    - Straights are evaluated in order of how they show up in the csv rows, so if your rows go "Ace", "Three", "Five", thats what the tool will consider "in order".
 
 *Created with the assistance of Claude Code.*
