@@ -185,6 +185,7 @@ class MainWindow(QMainWindow):
         deck_params    = self._deck_config.get_params()
         options_params = self._options.get_params()
         filter_str     = self._filter_builder.get_filter_str()
+        wildcard_mode  = self._filter_builder.get_wildcard_mode()
 
         # Validate file paths before kicking off worker
         if deck_params["source"] == "csv" and not deck_params["deck_path"]:
@@ -194,7 +195,7 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "No Combos File", "Please select a combinations CSV file.")
             return
 
-        params = {**deck_params, **options_params, "filter_str": filter_str}
+        params = {**deck_params, **options_params, "filter_str": filter_str, "wildcard_mode": wildcard_mode}
 
         self._run_btn.setEnabled(False)
         self._progress_bar.setVisible(True)

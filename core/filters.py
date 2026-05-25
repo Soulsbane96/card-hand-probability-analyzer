@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+import itertools
 from collections import Counter
-from typing import List, Optional, Tuple
+from typing import Iterator, List, Optional, Tuple
 
 from core.cards import Card, get_sequence_order, _is_consecutive
 
@@ -202,6 +203,46 @@ class FilterClause:
     def matches(self, hand: Tuple[Card, ...]) -> bool:
         return all(t.matches(hand) for t in self.tokens)
 
+    def _matches_wildcards_any(self, hand: Tuple[Card, ...]) -> bool:
+        """Wildcard mode 'any': hand matches if ANY single consistent substitution
+        satisfies every token in this clause simultaneously."""
+        for concrete in _expand_wildcards(hand):
+            if all(t.matches(concrete) for t in self.tokens):
+                return True
+        return False
+
+    def _matches_wildcards_optimal(self, hand: Tuple[Card, ...]) -> bool:
+        """Wildcard mode 'optimal': wildcards are evaluated with split semantics.
+
+        Positive tokens (negated=False): satisfied if there EXISTS a substitution
+        where the token is True.  Negative tokens (negated=True): satisfied only
+        if EVERY substitution that passes all positive tokens also keeps the base
+        condition False.
+
+        This prevents a wildcard from "dodging" a negated condition by being
+        played sub-optimally.  For example, a Joker that can complete a straight
+        flush will NOT sneak into the "flush but not straight" bucket just because
+        it could also be played as a non-completing card.
+        """
+        positive = [t for t in self.tokens if not t.negated]
+        negative = [t for t in self.tokens if t.negated]
+
+        # Collect every concrete substitution that satisfies all positive conditions.
+        valid_subs = [
+            concrete
+            for concrete in _expand_wildcards(hand)
+            if all(t.matches(concrete) for t in positive)
+        ]
+
+        if not valid_subs:
+            return False
+
+        # Every positive-satisfying substitution must also pass all negative tokens.
+        return all(
+            all(t.matches(concrete) for t in negative)
+            for concrete in valid_subs
+        )
+
     def describe(self) -> str:
         return "  AND  ".join(t.describe() for t in self.tokens)
 
@@ -211,14 +252,25 @@ class FilterClause:
 
 class FilterSpec:
     """Top-level filter parsed from the --filter string.
-    Clauses are split on ";" and OR-ed together: a hand matches if ANY single clause matches."""
+    Clauses are split on ";" and OR-ed together: a hand matches if ANY single clause matches.
 
-    def __init__(self, filter_str: str):
-        self.raw     = filter_str.strip()
-        self.clauses = [FilterClause(c) for c in filter_str.split(";") if c.strip()]
+    wildcard_mode controls how flexible cards (wildcards) are evaluated:
+      "any"     — hand matches if any single consistent substitution satisfies the full clause.
+      "optimal" — positive tokens use EXISTS semantics; negative tokens use FORALL over the
+                  positive-satisfying substitutions (wildcards play their best possible hand).
+    """
+
+    def __init__(self, filter_str: str, wildcard_mode: str = "any"):
+        self.raw           = filter_str.strip()
+        self.wildcard_mode = wildcard_mode
+        self.clauses       = [FilterClause(c) for c in filter_str.split(";") if c.strip()]
 
     def matches(self, hand: Tuple[Card, ...]) -> bool:
-        return any(c.matches(hand) for c in self.clauses)
+        if not any(c.is_flexible for c in hand):
+            return any(c.matches(hand) for c in self.clauses)
+        if self.wildcard_mode == "optimal":
+            return any(c._matches_wildcards_optimal(hand) for c in self.clauses)
+        return any(c._matches_wildcards_any(hand) for c in self.clauses)
 
     def describe(self) -> str:
         if len(self.clauses) == 1:
@@ -236,5 +288,36 @@ class FilterSpec:
                     )
 
 
-def parse_filter(filter_str: str) -> Optional[FilterSpec]:
-    return FilterSpec(filter_str) if filter_str.strip() else None
+def parse_filter(filter_str: str, wildcard_mode: str = "any") -> Optional[FilterSpec]:
+    return FilterSpec(filter_str, wildcard_mode=wildcard_mode) if filter_str.strip() else None
+
+
+# ---------------------------------------------------------------------------
+# Wildcard expansion
+# ---------------------------------------------------------------------------
+
+def _expand_wildcards(hand: Tuple[Card, ...]) -> Iterator[Tuple[Card, ...]]:
+    """Yield all concrete hands produced by substituting each flexible card.
+
+    Each flexible card's pre-resolved alternatives list is used directly, so
+    no deck context is needed here.  If a flexible card has no alternatives
+    (shouldn't happen after validation, but guards against empty lists),
+    the hand is silently dropped.
+    """
+    wild_indices = [i for i, c in enumerate(hand) if c.is_flexible]
+    if not wild_indices:
+        yield hand
+        return
+
+    alt_lists = [
+        [Card(attrs) for attrs in hand[i].alternatives]  # type: ignore[arg-type]
+        for i in wild_indices
+    ]
+    if any(not lst for lst in alt_lists):
+        return  # no valid substitutions — hand produces no concrete hands
+
+    for combo in itertools.product(*alt_lists):
+        concrete: List[Card] = list(hand)
+        for idx, alt in zip(wild_indices, combo):
+            concrete[idx] = alt
+        yield tuple(concrete)

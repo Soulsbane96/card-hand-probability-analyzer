@@ -66,9 +66,10 @@ class AnalysisWorker(QThread):
             cache_dir  = p.get("cache_dir") or _default_cache_dir()
 
             if source == "load_combos":
-                csv_path    = p["load_path"]
-                filter_str  = p.get("filter_str", "").strip()
-                filter_spec = parse_filter(filter_str)
+                csv_path      = p["load_path"]
+                filter_str    = p.get("filter_str", "").strip()
+                wildcard_mode = p.get("wildcard_mode", "any")
+                filter_spec   = parse_filter(filter_str, wildcard_mode=wildcard_mode)
 
                 # Peek headers first so we have hand_size for the cache key
                 import csv as _csv
@@ -170,10 +171,11 @@ class AnalysisWorker(QThread):
                     self.progress.emit("Using built-in 52-card deck.")
                     deck_hash = "standard"
 
-                attr_names = [c.lower() for c in columns]
-                hand_size  = p["hand_size"]
-                filter_str  = p.get("filter_str", "").strip()
-                filter_spec = parse_filter(filter_str)
+                attr_names    = [c.lower() for c in columns]
+                hand_size     = p["hand_size"]
+                filter_str    = p.get("filter_str", "").strip()
+                wildcard_mode = p.get("wildcard_mode", "any")
+                filter_spec   = parse_filter(filter_str, wildcard_mode=wildcard_mode)
                 if filter_spec:
                     filter_spec.validate_attrs(attr_names)
 

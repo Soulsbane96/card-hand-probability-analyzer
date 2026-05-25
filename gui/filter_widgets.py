@@ -441,6 +441,18 @@ class FilterBuilderWidget(QWidget):
         add_btn.clicked.connect(self._add_clause)
         layout.addWidget(add_btn)
 
+        # Wildcard mode toggle
+        self._wildcard_optimal_cb = QCheckBox("Wildcards play optimally")
+        self._wildcard_optimal_cb.setToolTip(
+            "Unchecked (Any): a hand matches if any single substitution of wildcards satisfies\n"
+            "the full filter — wildcards can be played as whatever makes each condition pass.\n\n"
+            "Checked (Optimal): positive conditions use the same logic as unchecked, but\n"
+            "negative conditions (NOT …) require that no substitution under the positive constraints\n"
+            "can satisfy the base condition. I.e. a Joker that can complete a straight flush\n"
+            "won't be counted in 'flush but not straight' just by being played as a non-completing card."
+        )
+        layout.addWidget(self._wildcard_optimal_cb)
+
         # Generated filter string (read-only reference)
         row = QHBoxLayout()
         row.addWidget(QLabel("Filter:"))
@@ -492,6 +504,9 @@ class FilterBuilderWidget(QWidget):
 
     def get_filter_str(self) -> str:
         return self._filter_display.text()
+
+    def get_wildcard_mode(self) -> str:
+        return "optimal" if self._wildcard_optimal_cb.isChecked() else "any"
 
     def get_clause_names(self) -> List[str]:
         return [c.get_name() for c in self._clauses]
