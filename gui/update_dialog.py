@@ -9,6 +9,7 @@ from PyQt6.QtWidgets import (
     QLabel,
     QProgressBar,
     QPushButton,
+    QTextEdit,
     QVBoxLayout,
 )
 
@@ -34,10 +35,10 @@ class _DownloadThread(QThread):
 
 
 class UpdateDialog(QDialog):
-    def __init__(self, new_version: str, download_url: str, parent=None) -> None:
+    def __init__(self, new_version: str, download_url: str, release_notes: str = "", parent=None) -> None:
         super().__init__(parent)
         self.setWindowTitle("Update Available")
-        self.setFixedWidth(420)
+        self.setFixedWidth(500)
         self._url  = download_url
         # Download next to the running exe so the bat-file move is a same-drive
         # rename (atomic) rather than a cross-drive copy that AV can block.
@@ -52,6 +53,13 @@ class UpdateDialog(QDialog):
         )
         self._label.setWordWrap(True)
         layout.addWidget(self._label)
+
+        if release_notes:
+            notes = QTextEdit()
+            notes.setReadOnly(True)
+            notes.setMarkdown(release_notes)
+            notes.setFixedHeight(200)
+            layout.addWidget(notes)
 
         self._progress = QProgressBar()
         self._progress.setRange(0, 100)

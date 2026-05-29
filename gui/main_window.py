@@ -39,13 +39,13 @@ from gui.results import ResultsPanel
 # ---------------------------------------------------------------------------
 
 class _UpdateCheckThread(QThread):
-    update_found = pyqtSignal(str, str)  # new_version, download_url
+    update_found = pyqtSignal(str, str, str)  # new_version, download_url, release_notes
 
     def run(self) -> None:
         try:
-            has_update, new_version, url = check_for_update(__version__)
+            has_update, new_version, url, release_notes = check_for_update(__version__)
             if has_update and url:
-                self.update_found.emit(new_version, url)
+                self.update_found.emit(new_version, url, release_notes)
         except Exception:
             pass
 
@@ -289,8 +289,8 @@ class MainWindow(QMainWindow):
         self._update_thread.update_found.connect(self._on_update_found)
         self._update_thread.start()
 
-    def _on_update_found(self, new_version: str, url: str) -> None:
-        dlg = UpdateDialog(new_version, url, self)
+    def _on_update_found(self, new_version: str, url: str, release_notes: str) -> None:
+        dlg = UpdateDialog(new_version, url, release_notes, self)
         dlg.exec()
 
 

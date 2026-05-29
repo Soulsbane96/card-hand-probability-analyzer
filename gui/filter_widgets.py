@@ -442,7 +442,7 @@ class FilterBuilderWidget(QWidget):
         layout.addWidget(add_btn)
 
         # Wildcard mode toggle
-        self._wildcard_optimal_cb = QCheckBox("Wildcards play optimally")
+        self._wildcard_optimal_cb = QCheckBox("Wildcards play optimally*")
         self._wildcard_optimal_cb.setToolTip(
             "Unchecked (Any): a hand matches if any single substitution of wildcards satisfies\n"
             "the full filter — wildcards can be played as whatever makes each condition pass.\n\n"
