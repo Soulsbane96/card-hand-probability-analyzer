@@ -17,8 +17,8 @@ def _parse_version(v: str) -> Tuple[int, ...]:
         return (0,)
 
 
-def check_for_update(current_version: str) -> Tuple[bool, str, str]:
-    """Return (has_update, new_version, download_url).  Raises on network error."""
+def check_for_update(current_version: str) -> Tuple[bool, str, str, str]:
+    """Return (has_update, new_version, download_url, release_notes).  Raises on network error."""
     req = urllib.request.Request(_API_URL, headers={"User-Agent": "CardHandAnalyzer"})
     with urllib.request.urlopen(req, timeout=10) as resp:
         data = json.loads(resp.read())
@@ -31,9 +31,10 @@ def check_for_update(current_version: str) -> Tuple[bool, str, str]:
             (a["browser_download_url"] for a in data.get("assets", []) if a["name"] == _ASSET_NAME),
             "",
         )
-        return True, latest_ver, download_url
+        release_notes = data.get("body", "")
+        return True, latest_ver, download_url, release_notes
 
-    return False, latest_ver, ""
+    return False, latest_ver, "", ""
 
 
 def download_update(

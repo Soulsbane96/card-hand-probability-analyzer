@@ -1,5 +1,6 @@
 Normal Deck.csv
 .vscode/launch.json
+.claude/
 
 # Python cache
 __pycache__/

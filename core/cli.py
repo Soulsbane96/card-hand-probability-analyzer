@@ -16,6 +16,28 @@ CSV DECK FORMAT
       2,Clubs,Black,2
       Ace,Spades,Black,14
 
+  WILD / MULTI-USE CARDS  (optional "alternatives" column)
+  Add an "alternatives" column to mark a card as flexible.  During filter
+  evaluation the card is replaced by each of its alternatives in turn; the
+  hand counts as matching if ANY substitution satisfies the filter.
+
+      alternatives value        meaning
+      ─────────────────────────────────────────────────────────
+      *                         True wildcard — any other card in the deck
+      rank:*,suit:Spades        Any deck card with that fixed suit (rank free)
+      rank:7,suit:Spades        Exactly the 7 of Spades
+      rank:7,suit:Spades|…      Pipe-separated list of the above forms
+
+  attr:* means "any value that attribute takes in this deck."
+  Unspecified attributes are resolved by matching against actual deck cards,
+  so every alternative is always a complete, valid card from the deck.
+
+  Examples:
+      *                         Joker / true wildcard
+      rank:*,suit:Hearts        Wild only for rank, always Hearts
+      rank:Ace,suit:*           Always an Ace, any suit
+      rank:7,suit:Spades|rank:2,suit:Hearts   Dual-identity card
+
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 FILTER DSL   --filter / -f
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

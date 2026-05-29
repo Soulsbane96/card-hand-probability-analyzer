@@ -39,13 +39,13 @@ from gui.results import ResultsPanel
 # ---------------------------------------------------------------------------
 
 class _UpdateCheckThread(QThread):
-    update_found = pyqtSignal(str, str)  # new_version, download_url
+    update_found = pyqtSignal(str, str, str)  # new_version, download_url, release_notes
 
     def run(self) -> None:
         try:
-            has_update, new_version, url = check_for_update(__version__)
+            has_update, new_version, url, release_notes = check_for_update(__version__)
             if has_update and url:
-                self.update_found.emit(new_version, url)
+                self.update_found.emit(new_version, url, release_notes)
         except Exception:
             pass
 
@@ -185,6 +185,7 @@ class MainWindow(QMainWindow):
         deck_params    = self._deck_config.get_params()
         options_params = self._options.get_params()
         filter_str     = self._filter_builder.get_filter_str()
+        wildcard_mode  = self._filter_builder.get_wildcard_mode()
 
         # Validate file paths before kicking off worker
         if deck_params["source"] == "csv" and not deck_params["deck_path"]:
@@ -194,7 +195,7 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "No Combos File", "Please select a combinations CSV file.")
             return
 
-        params = {**deck_params, **options_params, "filter_str": filter_str}
+        params = {**deck_params, **options_params, "filter_str": filter_str, "wildcard_mode": wildcard_mode}
 
         self._run_btn.setEnabled(False)
         self._progress_bar.setVisible(True)
@@ -288,8 +289,8 @@ class MainWindow(QMainWindow):
         self._update_thread.update_found.connect(self._on_update_found)
         self._update_thread.start()
 
-    def _on_update_found(self, new_version: str, url: str) -> None:
-        dlg = UpdateDialog(new_version, url, self)
+    def _on_update_found(self, new_version: str, url: str, release_notes: str) -> None:
+        dlg = UpdateDialog(new_version, url, release_notes, self)
         dlg.exec()
 
 
